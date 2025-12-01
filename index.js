@@ -320,6 +320,10 @@ const delay = (time) => {
       const elements = Array.from(document.querySelectorAll('div'));
       return elements.find(el => el.textContent.trim() === 'Requerimientos'); // Comparación exacta
     });
+
+    // Esperar 1 segundo
+    await delay(1000);
+    
     if (divHandle) {
       // Hacer hover sobre el div
       await frameOne.evaluate(el => {
