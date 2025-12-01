@@ -245,6 +245,12 @@ const finishOrContinue = async (page, browser) => {
   }
 }
 
+const delay = (time) => {
+  return new Promise(function(resolve) { 
+      setTimeout(resolve, time)
+  });
+}
+
 (async () => {
   // Lanzar un navegador
   const browser = await puppeteer.launch({ headless: false, }); // Headless:false para ver el navegador en acción
@@ -286,6 +292,7 @@ const finishOrContinue = async (page, browser) => {
   let frameTree = page.frames().find(frame => frame.name() === 'tres');
 
   if (frameTree) {
+    
     // Esperar a que los inputs dentro del frame estén cargados
     await frameTree.waitForSelector('input');
 
@@ -293,6 +300,9 @@ const finishOrContinue = async (page, browser) => {
     await frameTree.type('input[name="id_cliente"]', company);
     await frameTree.type('input[name="login"]', usernameDaybeat);
     await frameTree.type('input[name="password"]', password);
+
+    await delay(1000)
+
     // Enviar el formulario.
     await frameTree.click('input[type="submit"]');
 
