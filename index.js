@@ -486,6 +486,7 @@ const extractRegistrations = async (frameTree) => {
     let hasNextPage = true;
     
     while (hasNextPage) {
+      console.log(`      [DEBUG] Extrayendo página ${currentPage}...`);
       const registrations = await frameTree.evaluate(() => {
         const dates = [];
         const tables = document.querySelectorAll('table');
@@ -519,6 +520,11 @@ const extractRegistrations = async (frameTree) => {
         return dates;
       });
       
+      console.log(`      [DEBUG] Página ${currentPage}: ${registrations.length} fechas encontradas`);
+      if (registrations.length > 0) {
+        console.log(`      [DEBUG] Fechas: ${registrations.join(', ')}`);
+      }
+      
       allDates.push(...registrations);
       
       // Buscar enlace de "Siguiente página" - buscar por texto o patrón en href
@@ -535,6 +541,7 @@ const extractRegistrations = async (frameTree) => {
       });
       
       if (nextPageLink) {
+        console.log(`      [DEBUG] Siguiente página encontrada, navegando...`);
         await frameTree.evaluate((href) => {
           window.location.href = href;
         }, nextPageLink.href);
@@ -542,11 +549,14 @@ const extractRegistrations = async (frameTree) => {
         await delay(1500);
         currentPage++;
       } else {
+        console.log(`      [DEBUG] No hay más páginas`);
         hasNextPage = false;
       }
     }
     
-    return [...new Set(allDates)];
+    const uniqueDates = [...new Set(allDates)];
+    console.log(`      [DEBUG] Total fechas únicas extraídas: ${uniqueDates.length}`);
+    return uniqueDates;
   } catch (err) {
     console.log('Error extrayendo registros:', err.message);
     return [];
@@ -750,11 +760,15 @@ const showMissingRegistrations = async (page, browser, company, usernameDaybeat,
   
   const existingDates = [...new Set(allDates)];
   console.log(`\n\nTotal de registros encontrados: ${existingDates.length}`);
-  console.log('Fechas:', existingDates.sort().join(', '));
+  console.log('[DEBUG] Fechas encontradas:', existingDates.sort().join(', '));
   
   const today = new Date();
   const startDate = new Date(today.getTime() - (monthsToCheck * 30 * 24 * 60 * 60 * 1000));
   const businessDays = getBusinessDays(startDate, today);
+  
+  console.log('[DEBUG] Rango de búsqueda:', startDate.toLocaleDateString(), 'a', today.toLocaleDateString());
+  console.log('[DEBUG] Total días hábiles en el rango:', businessDays.length);
+  console.log('[DEBUG] Días hábiles:', businessDays.join(', '));
   
   const missingDays = getMissingRegistrations(existingDates, businessDays);
   
@@ -909,6 +923,9 @@ const registerBulkMissingDays = async (page, browser, company, usernameDaybeat, 
       
       const dates = await extractRegistrations(frameTree);
       console.log(`    Transacciones encontradas: ${dates.length}`);
+      if (dates.length > 0) {
+        console.log(`    Fechas: ${dates.join(', ')}`);
+      }
       allDates.push(...dates);
       
       await frameTree.evaluate((href) => {
@@ -927,10 +944,15 @@ const registerBulkMissingDays = async (page, browser, company, usernameDaybeat, 
   
   const existingDates = [...new Set(allDates)];
   console.log(`\n\nTotal de registros encontrados: ${existingDates.length}`);
+  console.log('[DEBUG] Fechas encontradas:', existingDates.sort().join(', '));
   
   const today = new Date();
   const startDate = new Date(today.getTime() - (monthsToCheck * 30 * 24 * 60 * 60 * 1000));
   const businessDays = getBusinessDays(startDate, today);
+  
+  console.log('[DEBUG] Rango de búsqueda:', startDate.toLocaleDateString(), 'a', today.toLocaleDateString());
+  console.log('[DEBUG] Total días hábiles en el rango:', businessDays.length);
+  console.log('[DEBUG] Días hábiles:', businessDays.join(', '));
   
   const missingDays = getMissingRegistrations(existingDates, businessDays);
   
