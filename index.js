@@ -514,7 +514,6 @@ const extractRegistrations = async (frameTree) => {
               }
             }
           }
-          break;
         }
         
         return dates;
@@ -530,18 +529,22 @@ const extractRegistrations = async (frameTree) => {
       // Buscar enlace de "Siguiente página" - buscar por texto o patrón en href
       const nextPageLink = await frameTree.evaluate(() => {
         const links = Array.from(document.querySelectorAll('a'));
-        return links.find(link => {
+        const paginationLinks = links.filter(link => {
           const text = link.textContent.trim();
-          // Buscar enlaces que digan "Siguiente", ">>", ">", o que tengan page= en URL
           return text.includes('Siguiente') || 
                  text === '>>' || 
                  text === '>' ||
                  (link.href.includes('page=') && !link.href.includes('page=0'));
         });
+        
+        if (paginationLinks.length > 0) {
+          return { href: paginationLinks[0].href, text: paginationLinks[0].textContent.trim() };
+        }
+        return null;
       });
       
       if (nextPageLink) {
-        console.log(`      [DEBUG] Siguiente página encontrada, navegando...`);
+        console.log(`      [DEBUG] Siguiente página encontrada: "${nextPageLink.text}"`);
         await frameTree.evaluate((href) => {
           window.location.href = href;
         }, nextPageLink.href);
@@ -1123,6 +1126,7 @@ const registerBulkMissingDays = async (page, browser, company, usernameDaybeat, 
   
   const successDays = [];
   const errorDays = [];
+  const alreadyRegisteredDays = [];
   
   console.log('\n====================================');
   console.log('INICIANDO REGISTRO MASIVO');
@@ -1130,7 +1134,17 @@ const registerBulkMissingDays = async (page, browser, company, usernameDaybeat, 
   
   for (let i = 0; i < missingDays.length; i++) {
     const day = missingDays[i];
-    console.log(`\n[${i + 1}/${missingDays.length}] Registrando día: ${day}`);
+    console.log(`\n[${i + 1}/${missingDays.length}] Procesando día: ${day}`);
+    
+    // Verificar si el día ya tiene registro en cualquier item
+    console.log(`  Verificando si ya existe registro...`);
+    const alreadyExists = existingDates.includes(day);
+    
+    if (alreadyExists) {
+      console.log(`  ⚠ Día ${day} ya tiene registro, saltando...`);
+      alreadyRegisteredDays.push(day);
+      continue;
+    }
     
     try {
       const allCommits = repos.flatMap(repo => getCommitsForDate(repo, day, author));
@@ -1219,11 +1233,17 @@ const registerBulkMissingDays = async (page, browser, company, usernameDaybeat, 
   console.log('====================================');
   console.log(`Total días sin registro: ${missingDays.length}`);
   console.log(`Días registrados exitosamente: ${successDays.length}`);
+  console.log(`Días ya registrados (saltados): ${alreadyRegisteredDays.length}`);
   console.log(`Días con error: ${errorDays.length}`);
   
   if (successDays.length > 0) {
     console.log('\nDías registrados:');
     successDays.forEach(day => console.log(`  ✓ ${day}`));
+  }
+  
+  if (alreadyRegisteredDays.length > 0) {
+    console.log('\nDías ya registrados (saltados):');
+    alreadyRegisteredDays.forEach(day => console.log(`  ⚠ ${day}`));
   }
   
   if (errorDays.length > 0) {
