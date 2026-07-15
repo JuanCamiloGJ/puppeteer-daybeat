@@ -479,12 +479,19 @@ const getMissingRegistrations = (existingDates, businessDays) => {
   return businessDays.filter(day => !existingDates.includes(day));
 };
 
-const extractRegistrations = async (frameTree) => {
+const extractRegistrations = async (frameTree, startDate = null) => {
   try {
     const allDates = [];
     let currentPage = 1;
     let hasNextPage = true;
-    const MAX_PAGES = 50; // Límite de seguridad
+    const MAX_PAGES = 5; // Límite de 5 páginas máximo
+    
+    // Convertir startDate a formato comparable (DD/MM/YYYY -> timestamp)
+    let startTimestamp = null;
+    if (startDate) {
+      const [dd, mm, yyyy] = startDate.split('/');
+      startTimestamp = new Date(`${yyyy}-${mm}-${dd}`).getTime();
+    }
     
     while (hasNextPage && currentPage <= MAX_PAGES) {
       console.log(`      [DEBUG] Extrayendo página ${currentPage}...`);
@@ -525,7 +532,31 @@ const extractRegistrations = async (frameTree) => {
         console.log(`      [DEBUG] Fechas: ${registrations.join(', ')}`);
       }
       
-      allDates.push(...registrations);
+      // Filtrar fechas y verificar si debemos detener la paginación
+      let allDatesOutOfRange = true;
+      
+      for (const dateStr of registrations) {
+        const [dd, mm, yyyy] = dateStr.split('/');
+        const dateTimestamp = new Date(`${yyyy}-${mm}-${dd}`).getTime();
+        
+        // Si no hay startDate, agregar todas las fechas
+        if (!startTimestamp) {
+          allDates.push(dateStr);
+          allDatesOutOfRange = false;
+        } else {
+          // Solo agregar fechas dentro del rango
+          if (dateTimestamp >= startTimestamp) {
+            allDates.push(dateStr);
+            allDatesOutOfRange = false;
+          }
+        }
+      }
+      
+      // Si todas las fechas de esta página están fuera del rango, detener paginación
+      if (startTimestamp && registrations.length > 0 && allDatesOutOfRange) {
+        console.log(`      [DEBUG] Todas las fechas están fuera del rango, deteniendo paginación`);
+        break;
+      }
       
       // Buscar el enlace de "siguiente página" de transacciones
       // Daybeat usa imágenes: 3up.gif (siguiente), 3dw.gif (siguiente), 3regresar.gif (regresar)
@@ -740,6 +771,12 @@ const showMissingRegistrations = async (page, browser, company, usernameDaybeat,
   
   console.log(`Proyectos encontrados: ${availableLinks.length}`);
   
+  // Calcular startDate ANTES de extraer fechas para optimizar paginación
+  const today = new Date();
+  const startDate = new Date(today.getTime() - (monthsToCheck * 30 * 24 * 60 * 60 * 1000));
+  const startDateStr = `${String(startDate.getDate()).padStart(2, '0')}/${String(startDate.getMonth() + 1).padStart(2, '0')}/${startDate.getFullYear()}`;
+  console.log(`[DEBUG] Rango de búsqueda: ${startDateStr} a ${String(today.getDate()).padStart(2, '0')}/${String(today.getMonth() + 1).padStart(2, '0')}/${today.getFullYear()}`);
+  
   const allDates = [];
   
   // Guardar la URL de la página de consulta para volver después
@@ -783,8 +820,8 @@ const showMissingRegistrations = async (page, browser, company, usernameDaybeat,
       await frameTree.waitForNavigation();
       await delay(1500);
       
-      // Extraer fechas de las transacciones (con paginación)
-      const dates = await extractRegistrations(frameTree);
+      // Extraer fechas de las transacciones (con paginación limitada al rango)
+      const dates = await extractRegistrations(frameTree, startDateStr);
       console.log(`    Transacciones encontradas: ${dates.length}`);
       allDates.push(...dates);
       
@@ -808,11 +845,8 @@ const showMissingRegistrations = async (page, browser, company, usernameDaybeat,
   console.log(`\n\nTotal de registros encontrados: ${existingDates.length}`);
   console.log('[DEBUG] Fechas encontradas:', existingDates.sort().join(', '));
   
-  const today = new Date();
-  const startDate = new Date(today.getTime() - (monthsToCheck * 30 * 24 * 60 * 60 * 1000));
   const businessDays = getBusinessDays(startDate, today);
   
-  console.log('[DEBUG] Rango de búsqueda:', startDate.toLocaleDateString(), 'a', today.toLocaleDateString());
   console.log('[DEBUG] Total días hábiles en el rango:', businessDays.length);
   console.log('[DEBUG] Días hábiles:', businessDays.join(', '));
   
@@ -932,6 +966,12 @@ const registerBulkMissingDays = async (page, browser, company, usernameDaybeat, 
   
   console.log(`Proyectos encontrados: ${availableLinks.length}`);
   
+  // Calcular startDate ANTES de extraer fechas para optimizar paginación
+  const today = new Date();
+  const startDate = new Date(today.getTime() - (monthsToCheck * 30 * 24 * 60 * 60 * 1000));
+  const startDateStr = `${String(startDate.getDate()).padStart(2, '0')}/${String(startDate.getMonth() + 1).padStart(2, '0')}/${startDate.getFullYear()}`;
+  console.log(`[DEBUG] Rango de búsqueda: ${startDateStr} a ${String(today.getDate()).padStart(2, '0')}/${String(today.getMonth() + 1).padStart(2, '0')}/${today.getFullYear()}`);
+  
   const allDates = [];
   const consultaUrl = await frameTree.evaluate(() => window.location.href);
   
@@ -967,7 +1007,7 @@ const registerBulkMissingDays = async (page, browser, company, usernameDaybeat, 
       await frameTree.waitForNavigation();
       await delay(1500);
       
-      const dates = await extractRegistrations(frameTree);
+      const dates = await extractRegistrations(frameTree, startDateStr);
       console.log(`    Transacciones encontradas: ${dates.length}`);
       if (dates.length > 0) {
         console.log(`    Fechas: ${dates.join(', ')}`);
@@ -992,11 +1032,8 @@ const registerBulkMissingDays = async (page, browser, company, usernameDaybeat, 
   console.log(`\n\nTotal de registros encontrados: ${existingDates.length}`);
   console.log('[DEBUG] Fechas encontradas:', existingDates.sort().join(', '));
   
-  const today = new Date();
-  const startDate = new Date(today.getTime() - (monthsToCheck * 30 * 24 * 60 * 60 * 1000));
   const businessDays = getBusinessDays(startDate, today);
   
-  console.log('[DEBUG] Rango de búsqueda:', startDate.toLocaleDateString(), 'a', today.toLocaleDateString());
   console.log('[DEBUG] Total días hábiles en el rango:', businessDays.length);
   console.log('[DEBUG] Días hábiles:', businessDays.join(', '));
   
