@@ -463,7 +463,9 @@ Responde SOLO en formato JSON válido, sin texto adicional:
   
   try {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+    console.log(`  [IA] Usando modelo: ${model}`);
     
+    const startTime = Date.now();
     const response = await fetch(url, {
       method: 'POST',
       headers: {
@@ -480,8 +482,11 @@ Responde SOLO en formato JSON válido, sin texto adicional:
           maxOutputTokens: 1024
         }
       }),
-      signal: AbortSignal.timeout(10000)
+      signal: AbortSignal.timeout(60000)
     });
+    
+    const responseTime = Date.now() - startTime;
+    console.log(`  [IA] Respuesta recibida en ${responseTime}ms`);
     
     if (!response.ok) {
       console.log(`  [IA] Error en API: ${response.status}`);
