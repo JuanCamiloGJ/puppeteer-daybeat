@@ -277,7 +277,7 @@ const getCommitsForDate = (repoPath, dateStr, author = null) => {
   }
 };
 
-const getRecentCommitsBeforeDate = (repoPath, dateStr, days = 7, author = null) => {
+const getRecentCommitsBeforeDate = (repoPath, dateStr, days = 5, author = null) => {
   try {
     const [day, month, year] = dateStr.split('/');
     const targetDate = new Date(`${year}-${month}-${day}`);
@@ -287,15 +287,144 @@ const getRecentCommitsBeforeDate = (repoPath, dateStr, days = 7, author = null) 
     
     const authorFilter = author ? `--author="${author}"` : '';
     const result = execSync(
-      `git log --since="${pastDateStr}" --until="${targetDateStr}" --all ${authorFilter} --format="%s"`,
+      `git log --since="${pastDateStr}" --until="${targetDateStr}" --all ${authorFilter} --format="%s|%ad" --date=short`,
       { cwd: repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }
     );
-    const commits = result.trim().split('\n').filter(msg => msg.length > 0);
+    const commits = result.trim().split('\n').filter(msg => msg.length > 0).map(line => {
+      const [message, date] = line.split('|');
+      return { message, date };
+    });
     console.log(`  ${repoPath}: ${commits.length} commits (${pastDateStr} a ${targetDateStr})`);
     return commits;
   } catch (err) {
     return [];
   }
+};
+
+const getRotatedCommits = (commitsWithDates, targetDateStr) => {
+  if (commitsWithDates.length === 0) return [];
+  
+  const [day, month, year] = targetDateStr.split('/');
+  const targetDate = new Date(`${year}-${month}-${day}`);
+  const dayOfWeek = targetDate.getDay();
+  
+  const sortedCommits = [...commitsWithDates].sort((a, b) => {
+    const dateA = new Date(a.date);
+    const dateB = new Date(b.date);
+    return dateB - dateA;
+  });
+  
+  const uniqueDates = [...new Set(sortedCommits.map(c => c.date))];
+  
+  let selectedDate;
+  switch (dayOfWeek) {
+    case 1: selectedDate = uniqueDates[0]; break;
+    case 2: selectedDate = uniqueDates[1] || uniqueDates[0]; break;
+    case 3: selectedDate = uniqueDates[2] || uniqueDates[1] || uniqueDates[0]; break;
+    case 4:
+      const date1 = uniqueDates[0];
+      const date2 = uniqueDates[1] || uniqueDates[0];
+      return sortedCommits.filter(c => c.date === date1 || c.date === date2).map(c => c.message);
+    case 5: selectedDate = uniqueDates[0]; break;
+    default: selectedDate = uniqueDates[0]; break;
+  }
+  
+  return sortedCommits.filter(c => c.date === selectedDate).map(c => c.message);
+};
+
+const getContextPrefix = (targetDateStr, commitsWithDates) => {
+  if (commitsWithDates.length === 0) return '';
+  
+  const [day, month, year] = targetDateStr.split('/');
+  const targetDate = new Date(`${year}-${month}-${day}`);
+  
+  const commitDates = commitsWithDates.map(c => new Date(c.date));
+  const mostRecentCommit = new Date(Math.max(...commitDates));
+  
+  const daysDiff = Math.floor((targetDate - mostRecentCommit) / (1000 * 60 * 60 * 24));
+  
+  if (daysDiff === 0) return '';
+  if (daysDiff === 1) return 'Continuación de: ';
+  if (daysDiff <= 3) return 'Seguimiento de: ';
+  if (daysDiff <= 5) return 'Avance en: ';
+  return 'Trabajo en: ';
+};
+
+const generateGenericText = (targetDateStr) => {
+  const [day, month, year] = targetDateStr.split('/');
+  const targetDate = new Date(`${year}-${month}-${day}`);
+  const dayOfWeek = targetDate.getDay();
+  
+  const genericTexts = {
+    1: {
+      titles: [
+        "Inicio de semana: revisión de código y planificación",
+        "Lunes: análisis de requerimientos y organización del sprint",
+        "Revisión de pendientes y planificación de tareas de la semana"
+      ],
+      details: [
+        "Inicio de semana laboral. Revisión de código pendiente, planificación de tareas para el sprint actual y organización de prioridades. Análisis de requerimientos pendientes y coordinación con el equipo.",
+        "Lunes de planificación. Revisión de tareas pendientes del sprint anterior, análisis de nuevos requerimientos y organización del trabajo para la semana. Coordinación con el equipo de desarrollo.",
+        "Inicio de semana enfocado en revisión y planificación. Análisis de código pendiente, actualización de documentación y organización de tareas prioritarias para el sprint actual."
+      ]
+    },
+    2: {
+      titles: [
+        "Desarrollo de funcionalidades y pruebas unitarias",
+        "Implementación de mejoras y correcciones menores",
+        "Avance en tareas de desarrollo y refactorización"
+      ],
+      details: [
+        "Martes de desarrollo activo. Implementación de funcionalidades pendientes, escritura de pruebas unitarias y corrección de errores menores. Refactorización de código para mejorar mantenibilidad.",
+        "Continuación de desarrollo. Implementación de mejoras solicitadas, corrección de bugs reportados y avance en tareas del sprint. Pruebas unitarias para nuevas funcionalidades.",
+        "Día enfocado en desarrollo y refactorización. Implementación de mejoras de código, optimización de consultas y avance en tareas pendientes. Revisión de calidad de código."
+      ]
+    },
+    3: {
+      titles: [
+        "Continuación de desarrollo y pruebas de integración",
+        "Avance en implementación y revisión de código",
+        "Desarrollo de features y ajustes de rendimiento"
+      ],
+      details: [
+        "Miércoles de desarrollo continuo. Avance en implementación de features, pruebas de integración y revisión de código con el equipo. Ajustes de rendimiento y optimización de consultas.",
+        "Continuación de tareas de desarrollo. Implementación de funcionalidades complejas, pruebas de integración y revisión de pull requests. Ajustes menores basados en feedback del equipo.",
+        "Día de avance significativo en desarrollo. Implementación de features críticas, pruebas de integración y optimización de rendimiento. Revisión de código y documentación técnica."
+      ]
+    },
+    4: {
+      titles: [
+        "Finalización de features y pruebas de calidad",
+        "Cierre de tareas pendientes y ajustes finales",
+        "Desarrollo completado y preparación para deploy"
+      ],
+      details: [
+        "Jueves de cierre de tareas. Finalización de features en desarrollo, pruebas de calidad y preparación para integración. Ajustes finales basados en revisión de código y feedback del equipo.",
+        "Cierre de tareas pendientes. Completación de features, pruebas exhaustivas y ajustes finales. Preparación de código para deploy y actualización de documentación técnica.",
+        "Día enfocado en finalizar tareas. Completación de desarrollo pendiente, pruebas de calidad y ajustes de último momento. Preparación para integración y deploy."
+      ]
+    },
+    5: {
+      titles: [
+        "Cierre de semana: finalización y documentación",
+        "Viernes: cierre de tareas y actualización de documentación",
+        "Finalización de sprint y preparación para revisión"
+      ],
+      details: [
+        "Cierre de semana laboral. Finalización de tareas pendientes, actualización de documentación técnica y preparación para revisión de sprint. Limpieza de código y organización para la próxima semana.",
+        "Viernes de cierre. Completación de tareas del sprint, actualización de documentación y preparación para revisión semanal. Organización de pendientes para la próxima semana.",
+        "Cierre de semana enfocado en finalización. Completación de features, actualización de documentación y preparación para revisión de sprint. Limpieza de código y organización de tareas."
+      ]
+    }
+  };
+  
+  const dayTexts = genericTexts[dayOfWeek] || genericTexts[2];
+  const randomIndex = Math.floor(Math.random() * dayTexts.titles.length);
+  
+  return {
+    title: dayTexts.titles[randomIndex],
+    detail: dayTexts.details[randomIndex]
+  };
 };
 
 const categorizeCommits = (commits) => {
@@ -435,7 +564,7 @@ const generateFakeSummary = (commits) => {
   return generateStructuredSummary(categories);
 };
 
-const generateWithGemini = async (commits) => {
+const generateWithGemini = async (commits, context = 'same-day', targetDate = null) => {
   const apiKey = process.env.GEMINI_API_KEY;
   const model = process.env.GEMINI_MODEL || 'gemini-3.5-flash';
   
@@ -449,14 +578,26 @@ const generateWithGemini = async (commits) => {
   
   const commitsText = commits.join('\n');
   
+  let contextInstruction = '';
+  if (context === 'continuation') {
+    contextInstruction = '\n\nIMPORTANTE: Estos commits son de días anteriores (no del día que se está registrando). Genera la descripción indicando que se CONTINÚA con el trabajo de días previos, usando frases como "Continuación de...", "Seguimiento de...", "Avance en...". No digas que se hizo hoy, sino que se continúa trabajando en ello.';
+  } else if (context === 'follow-up') {
+    contextInstruction = '\n\nIMPORTANTE: Estos commits son de días anteriores. Genera la descripción indicando que se da SEGUIMIENTO a tareas recientes, usando frases como "Seguimiento de...", "Trabajo en...", "Continuación de tareas de...". No digas que se hizo hoy, sino que se da seguimiento.';
+  } else if (context === 'no-commits') {
+    contextInstruction = '\n\nIMPORTANTE: No hay commits disponibles. Genera una descripción genérica pero variada de actividad de desarrollo según el día de la semana. Evita usar siempre el mismo texto.';
+  }
+  
+  const dateInfo = targetDate ? `\nDía a registrar: ${targetDate}` : '';
+  
   const prompt = `Eres un asistente que ayuda a generar descripciones de actividades laborales para un sistema de registro de tiempo.
 
 Basándote en los siguientes commits de git, genera:
 1. Un título corto (máximo 100 caracteres) que resuma la actividad
 2. Una descripción detallada (máximo 500 caracteres) que explique el trabajo realizado
-
+${dateInfo}
 Commits:
 ${commitsText}
+${contextInstruction}
 
 Responde SOLO en formato JSON válido, sin texto adicional:
 {"title": "título corto aquí", "detail": "descripción detallada aquí"}`;
@@ -1359,21 +1500,62 @@ const registerBulkMissingDays = async (page, browser, company, usernameDaybeat, 
     
     try {
       const allCommits = repos.flatMap(repo => getCommitsForDate(repo, day, author));
-      console.log(`  Commits encontrados: ${allCommits.length}`);
+      console.log(`  Commits encontrados del día: ${allCommits.length}`);
       
       let commitsToUse = allCommits;
+      let commitsWithDates = [];
+      let context = 'same-day';
+      
       if (allCommits.length === 0) {
-        console.log('  No hay commits ese día, usando últimos 3 días antes de la fecha');
-        commitsToUse = repos.flatMap(repo => getRecentCommitsBeforeDate(repo, day, 3, author));
-        console.log(`  Commits encontrados en últimos 3 días: ${commitsToUse.length}`);
+        console.log('  No hay commits ese día, buscando últimos 5 días antes de la fecha');
+        commitsWithDates = repos.flatMap(repo => getRecentCommitsBeforeDate(repo, day, 5, author));
+        console.log(`  Commits encontrados en últimos 5 días: ${commitsWithDates.length}`);
+        
+        if (commitsWithDates.length === 0) {
+          console.log('  No hay commits en últimos 5 días, buscando últimos 7 días');
+          commitsWithDates = repos.flatMap(repo => getRecentCommitsBeforeDate(repo, day, 7, author));
+          console.log(`  Commits encontrados en últimos 7 días: ${commitsWithDates.length}`);
+        }
+        
+        if (commitsWithDates.length > 0) {
+          commitsToUse = getRotatedCommits(commitsWithDates, day);
+          console.log(`  Commits seleccionados (rotación): ${commitsToUse.length}`);
+          
+          const prefix = getContextPrefix(day, commitsWithDates);
+          context = prefix.includes('Continuación') ? 'continuation' : 'follow-up';
+        } else {
+          console.log('  No hay commits disponibles, generando texto genérico variado');
+          context = 'no-commits';
+        }
       }
       
       let title, detail;
       
-      // Intentar generar con IA si hay API_KEY y commits
-      if (process.env.GEMINI_API_KEY && commitsToUse.length > 0) {
-        console.log('  Generando con Gemini AI...');
-        const aiResult = await generateWithGemini(commitsToUse);
+      if (context === 'no-commits') {
+        if (process.env.GEMINI_API_KEY) {
+          console.log('  Generando texto variado con Gemini AI...');
+          const fakeCommits = ['Sin commits específicos'];
+          const aiResult = await generateWithGemini(fakeCommits, 'no-commits', day);
+          
+          if (aiResult) {
+            title = aiResult.title;
+            detail = aiResult.detail;
+            console.log('  ✓ Texto variado generado con Gemini AI');
+          } else {
+            console.log('  ✗ IA falló, usando texto genérico por defecto');
+            const genericText = generateGenericText(day);
+            title = genericText.title;
+            detail = genericText.detail;
+          }
+        } else {
+          console.log('  Sin GEMINI_API_KEY, usando texto genérico variado');
+          const genericText = generateGenericText(day);
+          title = genericText.title;
+          detail = genericText.detail;
+        }
+      } else if (process.env.GEMINI_API_KEY && commitsToUse.length > 0) {
+        console.log(`  Generando con Gemini AI (contexto: ${context})...`);
+        const aiResult = await generateWithGemini(commitsToUse, context, day);
         
         if (aiResult) {
           title = aiResult.title;
@@ -1381,14 +1563,18 @@ const registerBulkMissingDays = async (page, browser, company, usernameDaybeat, 
           console.log('  ✓ Generado con Gemini AI');
         } else {
           console.log('  ✗ IA falló, usando método por defecto');
-          title = commitsToUse.length > 0 ? summarizeCommits(commitsToUse) : 'Actividad de desarrollo: revisión de código, pruebas y ajustes menores.';
+          const prefix = getContextPrefix(day, commitsWithDates);
+          const summary = summarizeCommits(commitsToUse);
+          title = prefix + summary;
           detail = generateDetail(commitsToUse);
         }
       } else {
         if (!process.env.GEMINI_API_KEY && commitsToUse.length > 0) {
           console.log('  Sin GEMINI_API_KEY, usando método por defecto');
         }
-        title = commitsToUse.length > 0 ? summarizeCommits(commitsToUse) : 'Actividad de desarrollo: revisión de código, pruebas y ajustes menores.';
+        const prefix = getContextPrefix(day, commitsWithDates);
+        const summary = summarizeCommits(commitsToUse);
+        title = prefix + summary;
         detail = generateDetail(commitsToUse);
       }
       
