@@ -435,6 +435,107 @@ const generateFakeSummary = (commits) => {
   return generateStructuredSummary(categories);
 };
 
+const generateWithGemini = async (commits) => {
+  const apiKey = process.env.GEMINI_API_KEY;
+  const model = process.env.GEMINI_MODEL || 'gemini-1.5-flash';
+  
+  if (!apiKey) {
+    return null;
+  }
+  
+  if (!commits || commits.length === 0) {
+    return null;
+  }
+  
+  const commitsText = commits.join('\n');
+  
+  const prompt = `Eres un asistente que ayuda a generar descripciones de actividades laborales para un sistema de registro de tiempo.
+
+Basándote en los siguientes commits de git, genera:
+1. Un título corto (máximo 100 caracteres) que resuma la actividad
+2. Una descripción detallada (máximo 500 caracteres) que explique el trabajo realizado
+
+Commits:
+${commitsText}
+
+Responde SOLO en formato JSON válido, sin texto adicional:
+{"title": "título corto aquí", "detail": "descripción detallada aquí"}`;
+  
+  try {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+    
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        contents: [{
+          parts: [{
+            text: prompt
+          }]
+        }],
+        generationConfig: {
+          temperature: 0.7,
+          maxOutputTokens: 1024
+        }
+      }),
+      signal: AbortSignal.timeout(10000)
+    });
+    
+    if (!response.ok) {
+      console.log(`  [IA] Error en API: ${response.status}`);
+      return null;
+    }
+    
+    const data = await response.json();
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+    
+    if (!text) {
+      console.log('  [IA] Respuesta vacía de Gemini');
+      return null;
+    }
+    
+    // Intentar parsear JSON de la respuesta
+    let result;
+    try {
+      // Buscar JSON en la respuesta (puede tener texto adicional)
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        result = JSON.parse(jsonMatch[0]);
+      } else {
+        console.log('  [IA] No se encontró JSON válido en la respuesta');
+        return null;
+      }
+    } catch (parseErr) {
+      console.log('  [IA] Error parseando JSON:', parseErr.message);
+      return null;
+    }
+    
+    if (!result.title || !result.detail) {
+      console.log('  [IA] Respuesta incompleta');
+      return null;
+    }
+    
+    // Limitar longitud
+    let title = result.title;
+    let detail = result.detail;
+    
+    if (title.length > 100) {
+      title = title.substring(0, 97) + '...';
+    }
+    if (detail.length > 500) {
+      detail = detail.substring(0, 497) + '...';
+    }
+    
+    return { title, detail };
+    
+  } catch (err) {
+    console.log(`  [IA] Error: ${err.message}`);
+    return null;
+  }
+};
+
 const HISTORY_FILE = path.join(__dirname, '.daybeat-history.json');
 
 const getLastUsedHours = () => {
@@ -1232,13 +1333,34 @@ const registerBulkMissingDays = async (page, browser, company, usernameDaybeat, 
       
       let commitsToUse = allCommits;
       if (allCommits.length === 0) {
-        console.log('  No hay commits ese día, usando últimos 7 días antes de la fecha');
-        commitsToUse = repos.flatMap(repo => getRecentCommitsBeforeDate(repo, day, 7, author));
-        console.log(`  Commits encontrados en últimos 7 días: ${commitsToUse.length}`);
+        console.log('  No hay commits ese día, usando últimos 3 días antes de la fecha');
+        commitsToUse = repos.flatMap(repo => getRecentCommitsBeforeDate(repo, day, 3, author));
+        console.log(`  Commits encontrados en últimos 3 días: ${commitsToUse.length}`);
       }
       
-      const title = commitsToUse.length > 0 ? summarizeCommits(commitsToUse) : 'Actividad de desarrollo: revisión de código, pruebas y ajustes menores.';
-      const detail = generateDetail(commitsToUse);
+      let title, detail;
+      
+      // Intentar generar con IA si hay API_KEY y commits
+      if (process.env.GEMINI_API_KEY && commitsToUse.length > 0) {
+        console.log('  Generando con Gemini AI...');
+        const aiResult = await generateWithGemini(commitsToUse);
+        
+        if (aiResult) {
+          title = aiResult.title;
+          detail = aiResult.detail;
+          console.log('  ✓ Generado con Gemini AI');
+        } else {
+          console.log('  ✗ IA falló, usando método por defecto');
+          title = commitsToUse.length > 0 ? summarizeCommits(commitsToUse) : 'Actividad de desarrollo: revisión de código, pruebas y ajustes menores.';
+          detail = generateDetail(commitsToUse);
+        }
+      } else {
+        if (!process.env.GEMINI_API_KEY && commitsToUse.length > 0) {
+          console.log('  Sin GEMINI_API_KEY, usando método por defecto');
+        }
+        title = commitsToUse.length > 0 ? summarizeCommits(commitsToUse) : 'Actividad de desarrollo: revisión de código, pruebas y ajustes menores.';
+        detail = generateDetail(commitsToUse);
+      }
       
       console.log(`  Título: ${title.substring(0, 50)}...`);
       
@@ -1366,11 +1488,12 @@ const registerNewTransaction = async (frameTree, page, autoData = null) => {
   console.log('-------------------------');
   console.log('MODO DE REGISTRO:');
   console.log('1. Automático (commits de hoy)');
-  console.log('2. Automático fake (basado en días anteriores)');
-  console.log('3. Manual');
+  console.log('2. Con IA (Gemini)');
+  console.log('3. Automático fake (basado en días anteriores)');
+  console.log('4. Manual');
   console.log('-------------------------');
 
-  const mode = await questionUserResponse(frameTree, 'Seleccione modo (1/2/3): ');
+  const mode = await questionUserResponse(frameTree, 'Seleccione modo (1/2/3/4): ');
 
   let title = null;
   let formattedDate = null;
@@ -1442,6 +1565,73 @@ const registerNewTransaction = async (frameTree, page, autoData = null) => {
       title = null;
     }
   } else if (mode === '2') {
+    // Modo Con IA (Gemini)
+    const rootDir = process.env.ROOT_DIR;
+    console.log('-------------------------');
+    console.log('Buscando repositorios en:', rootDir);
+    const repos = findGitRepos(rootDir);
+    console.log(`Repositorios encontrados: ${repos.length}`);
+    
+    const author = getGitAuthor(repos);
+    if (author) {
+      console.log(`Filtrando commits por autor: ${author}`);
+    } else {
+      console.log('No se pudo determinar el autor. Mostrando todos los commits.');
+    }
+    
+    let allCommits = [];
+    if (repos.length > 0) {
+      allCommits = repos.flatMap(repo => getTodayCommits(repo, author));
+      console.log(`Total de commits hoy: ${allCommits.length}`);
+      
+      if (allCommits.length === 0) {
+        console.log('No hay commits hoy, usando últimos 3 días...');
+        allCommits = repos.flatMap(repo => getRecentCommits(repo, 3, author));
+        console.log(`Total de commits en últimos 3 días: ${allCommits.length}`);
+      }
+    }
+    
+    const hours = getLastUsedHours();
+    startTime = hours.start;
+    endTime = hours.end;
+    formattedDate = defaultDate;
+    
+    // Intentar generar con IA
+    if (process.env.GEMINI_API_KEY && allCommits.length > 0) {
+      console.log('  Generando con Gemini AI...');
+      const aiResult = await generateWithGemini(allCommits);
+      
+      if (aiResult) {
+        title = aiResult.title;
+        detail = aiResult.detail;
+        console.log('  ✓ Generado con Gemini AI');
+      } else {
+        console.log('  ✗ IA falló, usando método por defecto');
+        title = allCommits.length > 0 ? summarizeCommits(allCommits) : generateFakeSummary(allCommits);
+        detail = generateDetail(allCommits);
+      }
+    } else {
+      if (!process.env.GEMINI_API_KEY) {
+        console.log('  No hay GEMINI_API_KEY, usando método por defecto');
+      }
+      title = allCommits.length > 0 ? summarizeCommits(allCommits) : generateFakeSummary(allCommits);
+      detail = generateDetail(allCommits);
+    }
+    
+    console.log('-------------------------');
+    console.log('RESUMEN CON IA:');
+    console.log(`Título: ${title}`);
+    console.log(`Detalle: ${detail}`);
+    console.log(`Fecha: ${dd}/${mm}/${yyyy}`);
+    console.log(`Horario: ${startTime} - ${endTime}`);
+    console.log('-------------------------');
+    
+    const confirm = await questionUserResponse(frameTree, '¿Desea continuar con estos datos? (si/no): ');
+    if (confirm !== 'si') {
+      console.log('Cambiando a modo manual...');
+      title = null;
+    }
+  } else if (mode === '3') {
     const rootDir = process.env.ROOT_DIR;
     console.log('-------------------------');
     console.log('Buscando repositorios en:', rootDir);
