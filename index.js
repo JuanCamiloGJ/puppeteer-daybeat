@@ -437,7 +437,7 @@ const generateFakeSummary = (commits) => {
 
 const generateWithGemini = async (commits) => {
   const apiKey = process.env.GEMINI_API_KEY;
-  const model = process.env.GEMINI_MODEL || 'gemini-flash-latest';
+  const model = process.env.GEMINI_MODEL || 'gemini-3.5-flash';
   
   if (!apiKey) {
     return null;
@@ -461,84 +461,109 @@ ${commitsText}
 Responde SOLO en formato JSON válido, sin texto adicional:
 {"title": "título corto aquí", "detail": "descripción detallada aquí"}`;
   
-  try {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-    console.log(`  [IA] Usando modelo: ${model}`);
-    
-    const startTime = Date.now();
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        contents: [{
-          parts: [{
-            text: prompt
-          }]
-        }],
-        generationConfig: {
-          temperature: 0.7,
-          maxOutputTokens: 1024
-        }
-      }),
-      signal: AbortSignal.timeout(60000)
-    });
-    
-    const responseTime = Date.now() - startTime;
-    console.log(`  [IA] Respuesta recibida en ${responseTime}ms`);
-    
-    if (!response.ok) {
-      console.log(`  [IA] Error en API: ${response.status}`);
-      return null;
-    }
-    
-    const data = await response.json();
-    const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-    
-    if (!text) {
-      console.log('  [IA] Respuesta vacía de Gemini');
-      return null;
-    }
-    
-    // Intentar parsear JSON de la respuesta
-    let result;
+  const maxRetries = 4;
+  const baseDelay = 2000; // 2 segundos
+  
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      // Buscar JSON en la respuesta (puede tener texto adicional)
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        result = JSON.parse(jsonMatch[0]);
-      } else {
-        console.log('  [IA] No se encontró JSON válido en la respuesta');
+      const url = 'https://generativelanguage.googleapis.com/v1beta/interactions';
+      console.log(`  [IA] Usando modelo: ${model}`);
+      console.log(`  [IA] Intento ${attempt}/${maxRetries}...`);
+      
+      const startTime = Date.now();
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': apiKey
+        },
+        body: JSON.stringify({
+          model: model,
+          input: prompt
+        }),
+        signal: AbortSignal.timeout(60000)
+      });
+      
+      const responseTime = Date.now() - startTime;
+      console.log(`  [IA] Respuesta recibida en ${responseTime}ms`);
+      
+      if (!response.ok) {
+        const errorBody = await response.text();
+        console.log(`  [IA] Error en API: ${response.status}`);
+        console.log(`  [IA] Detalle: ${errorBody.substring(0, 200)}`);
+        
+        // Retry solo para errores 503 (Service Unavailable)
+        if (response.status === 503 && attempt < maxRetries) {
+          const delay = baseDelay * Math.pow(2, attempt - 1);
+          console.log(`  [IA] Reintentando en ${delay/1000}s...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+          continue;
+        }
+        
         return null;
       }
-    } catch (parseErr) {
-      console.log('  [IA] Error parseando JSON:', parseErr.message);
+      
+      const data = await response.json();
+      
+      // Buscar el step con type === "model_output"
+      const outputStep = data.steps?.find(step => step.type === 'model_output');
+      const text = outputStep?.content?.[0]?.text;
+      
+      if (!text) {
+        console.log('  [IA] Respuesta vacía de Gemini');
+        return null;
+      }
+      
+      // Intentar parsear JSON de la respuesta
+      let result;
+      try {
+        // Buscar JSON en la respuesta (puede tener texto adicional)
+        const jsonMatch = text.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          result = JSON.parse(jsonMatch[0]);
+        } else {
+          console.log('  [IA] No se encontró JSON válido en la respuesta');
+          return null;
+        }
+      } catch (parseErr) {
+        console.log('  [IA] Error parseando JSON:', parseErr.message);
+        return null;
+      }
+      
+      if (!result.title || !result.detail) {
+        console.log('  [IA] Respuesta incompleta');
+        return null;
+      }
+      
+      // Limitar longitud
+      let title = result.title;
+      let detail = result.detail;
+      
+      if (title.length > 100) {
+        title = title.substring(0, 97) + '...';
+      }
+      if (detail.length > 500) {
+        detail = detail.substring(0, 497) + '...';
+      }
+      
+      return { title, detail };
+      
+    } catch (err) {
+      console.log(`  [IA] Error en intento ${attempt}: ${err.message}`);
+      
+      // Retry para errores de timeout o red
+      if (attempt < maxRetries) {
+        const delay = baseDelay * Math.pow(2, attempt - 1);
+        console.log(`  [IA] Reintentando en ${delay/1000}s...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        continue;
+      }
+      
       return null;
     }
-    
-    if (!result.title || !result.detail) {
-      console.log('  [IA] Respuesta incompleta');
-      return null;
-    }
-    
-    // Limitar longitud
-    let title = result.title;
-    let detail = result.detail;
-    
-    if (title.length > 100) {
-      title = title.substring(0, 97) + '...';
-    }
-    if (detail.length > 500) {
-      detail = detail.substring(0, 497) + '...';
-    }
-    
-    return { title, detail };
-    
-  } catch (err) {
-    console.log(`  [IA] Error: ${err.message}`);
-    return null;
   }
+  
+  return null;
 };
 
 const HISTORY_FILE = path.join(__dirname, '.daybeat-history.json');

@@ -16,7 +16,7 @@ Requires `.env` (see `.env.example`) with: `LINK_DAYBEAT`, `COMPANY`, `USERNAME_
 
 Optional AI configuration:
 - `GEMINI_API_KEY`: API key for Google Gemini AI. If provided, enables AI-generated summaries.
-- `GEMINI_MODEL`: Model to use (defaults to `gemini-flash-latest`).
+- `GEMINI_MODEL`: Model to use (defaults to `gemini-3.5-flash`).
 
 ## Key facts
 
@@ -90,9 +90,10 @@ Commits are categorized by conventional commit prefix (`feat:`, `fix:`, `refacto
 When `GEMINI_API_KEY` is configured, the script can use Google Gemini AI to generate more natural and detailed summaries:
 
 - **Function**: `generateWithGemini(commits)` sends commits to Gemini API and parses JSON response
-- **Endpoint**: `https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={apiKey}`
-- **Model**: Uses `GEMINI_MODEL` env var (defaults to `gemini-flash-latest`)
+- **Endpoint**: `https://generativelanguage.googleapis.com/v1beta/interactions` (uses `x-goog-api-key` header)
+- **Model**: Uses `GEMINI_MODEL` env var (defaults to `gemini-3.5-flash`)
 - **Prompt**: Asks for title (max 100 chars) and detail (max 500 chars) in Spanish
+- **Retry logic**: Implements exponential backoff retry (up to 4 attempts) for 503 errors and timeouts
 - **Fallback**: If AI fails or no API key, falls back to default rule-based summary
 - **Usage**: 
   - Available as option 2 "Con IA (Gemini)" in single registration mode
