@@ -16,7 +16,7 @@ Requires `.env` (see `.env.example`) with: `LINK_DAYBEAT`, `COMPANY`, `USERNAME_
 
 Optional AI configuration:
 - `GEMINI_API_KEY`: API key for Google Gemini AI. If provided, enables AI-generated summaries.
-- `GEMINI_MODEL`: Model to use (defaults to `gemini-1.5-flash`).
+- `GEMINI_MODEL`: Model to use (defaults to `gemini-flash-latest`).
 
 ## Key facts
 
@@ -91,7 +91,7 @@ When `GEMINI_API_KEY` is configured, the script can use Google Gemini AI to gene
 
 - **Function**: `generateWithGemini(commits)` sends commits to Gemini API and parses JSON response
 - **Endpoint**: `https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={apiKey}`
-- **Model**: Uses `GEMINI_MODEL` env var (defaults to `gemini-1.5-flash`)
+- **Model**: Uses `GEMINI_MODEL` env var (defaults to `gemini-flash-latest`)
 - **Prompt**: Asks for title (max 100 chars) and detail (max 500 chars) in Spanish
 - **Fallback**: If AI fails or no API key, falls back to default rule-based summary
 - **Usage**: 
