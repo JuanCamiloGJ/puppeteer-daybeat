@@ -526,25 +526,114 @@ const extractRegistrations = async (frameTree) => {
       
       allDates.push(...registrations);
       
-      // Buscar enlace de "Siguiente página" - buscar por texto o patrón en href
-      const nextPageLink = await frameTree.evaluate(() => {
+      // Diagnóstico: listar todos los enlaces de la página
+      console.log(`      [DEBUG] Buscando enlaces de paginación...`);
+      const allLinks = await frameTree.evaluate(() => {
         const links = Array.from(document.querySelectorAll('a'));
-        const paginationLinks = links.filter(link => {
-          const text = link.textContent.trim();
-          return text.includes('Siguiente') || 
-                 text === '>>' || 
-                 text === '>' ||
-                 (link.href.includes('page=') && !link.href.includes('page=0'));
+        return links.map(link => {
+          const img = link.querySelector('img');
+          return {
+            text: link.textContent.trim(),
+            href: link.href,
+            hasImage: !!img,
+            imgSrc: img ? img.src : null,
+            imgAlt: img ? img.alt : null
+          };
         });
-        
-        if (paginationLinks.length > 0) {
-          return { href: paginationLinks[0].href, text: paginationLinks[0].textContent.trim() };
-        }
-        return null;
       });
       
+      console.log(`      [DEBUG] Total enlaces encontrados: ${allLinks.length}`);
+      
+      // Filtrar enlaces que podrían ser de paginación
+      const paginationLinks = allLinks.filter(link => {
+        // Buscar enlaces con parámetros de paginación
+        const hasPageParam = link.href.includes('page=') || link.href.includes('page_trans=');
+        // Buscar enlaces con imágenes (como 3up.gif, 4up.gif)
+        const hasPaginationImage = link.hasImage && (
+          link.imgSrc.includes('up.gif') || 
+          link.imgSrc.includes('next') ||
+          link.imgSrc.includes('forward')
+        );
+        // Buscar enlaces con texto de paginación
+        const hasPaginationText = link.text.includes('Siguiente') || 
+                                  link.text === '>>' || 
+                                  link.text === '>' ||
+                                  link.text.includes('Next');
+        
+        return hasPageParam || hasPaginationImage || hasPaginationText;
+      });
+      
+      console.log(`      [DEBUG] Enlaces de paginación encontrados: ${paginationLinks.length}`);
+      if (paginationLinks.length > 0) {
+        paginationLinks.forEach((link, idx) => {
+          console.log(`      [DEBUG]   Enlace ${idx + 1}:`);
+          console.log(`      [DEBUG]     Texto: "${link.text}"`);
+          console.log(`      [DEBUG]     Href: ${link.href}`);
+          console.log(`      [DEBUG]     Tiene imagen: ${link.hasImage}`);
+          if (link.hasImage) {
+            console.log(`      [DEBUG]     Imagen: ${link.imgSrc}`);
+          }
+        });
+      }
+      
+      // Buscar el enlace de "siguiente página"
+      const nextPageLink = await frameTree.evaluate((currentPageNum) => {
+        const links = Array.from(document.querySelectorAll('a'));
+        
+        // Buscar enlaces con imágenes de paginación (como 3up.gif, 4up.gif)
+        for (const link of links) {
+          const img = link.querySelector('img');
+          if (img) {
+            const imgSrc = img.src.toLowerCase();
+            if (imgSrc.includes('up.gif') || imgSrc.includes('next') || imgSrc.includes('forward')) {
+              // Verificar que sea para avanzar (no retroceder)
+              const href = link.href.toLowerCase();
+              // Buscar el patrón page=N o page_trans=N donde N es mayor que la página actual
+              const pageMatch = href.match(/page[_\w]*=(\d+)/);
+              if (pageMatch) {
+                const pageNum = parseInt(pageMatch[1]);
+                // Si el número de página es mayor o igual, es un enlace de siguiente
+                if (pageNum >= currentPageNum) {
+                  return { href: link.href, text: link.textContent.trim(), hasImage: true, imgSrc: img.src };
+                }
+              }
+            }
+          }
+        }
+        
+        // Buscar enlaces con texto de paginación
+        for (const link of links) {
+          const text = link.textContent.trim();
+          if (text.includes('Siguiente') || text === '>>' || text === '>' || text.includes('Next')) {
+            return { href: link.href, text: text, hasImage: false };
+          }
+        }
+        
+        // Buscar enlaces con parámetros de paginación
+        for (const link of links) {
+          const href = link.href;
+          if (href.includes('page=') || href.includes('page_trans=')) {
+            const pageMatch = href.match(/page[_\w]*=(\d+)/);
+            if (pageMatch) {
+              const pageNum = parseInt(pageMatch[1]);
+              if (pageNum >= currentPageNum) {
+                return { href: link.href, text: link.textContent.trim(), hasImage: false };
+              }
+            }
+          }
+        }
+        
+        return null;
+      }, currentPage - 1);
+      
       if (nextPageLink) {
-        console.log(`      [DEBUG] Siguiente página encontrada: "${nextPageLink.text}"`);
+        console.log(`      [DEBUG] Siguiente página encontrada:`);
+        console.log(`      [DEBUG]   Texto: "${nextPageLink.text}"`);
+        console.log(`      [DEBUG]   Href: ${nextPageLink.href}`);
+        if (nextPageLink.hasImage) {
+          console.log(`      [DEBUG]   Imagen: ${nextPageLink.imgSrc}`);
+        }
+        
         await frameTree.evaluate((href) => {
           window.location.href = href;
         }, nextPageLink.href);
