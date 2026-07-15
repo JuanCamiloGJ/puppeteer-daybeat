@@ -592,6 +592,26 @@ const showMissingRegistrations = async (page, browser, company, usernameDaybeat,
   console.log('CONSULTANDO DÍAS SIN REGISTRO');
   console.log('====================================');
   
+  console.log('\nSeleccione el período a consultar:');
+  console.log('1. Último mes');
+  console.log('2. Últimos 2 meses');
+  console.log('3. Últimos 3 meses');
+  
+  const periodOption = await new Promise((resolve) => {
+    rl.question('Seleccione opción (1/2/3): ', (answer) => {
+      resolve(answer);
+    });
+  });
+  
+  let monthsToCheck = 1;
+  if (periodOption === '2') {
+    monthsToCheck = 2;
+  } else if (periodOption === '3') {
+    monthsToCheck = 3;
+  }
+  
+  console.log(`\nPeríodo seleccionado: ${monthsToCheck} mes(es)`);
+  
   let frameTree = page.frames().find(frame => frame.name() === 'tres');
   
   if (!frameTree) {
@@ -733,13 +753,13 @@ const showMissingRegistrations = async (page, browser, company, usernameDaybeat,
   console.log('Fechas:', existingDates.sort().join(', '));
   
   const today = new Date();
-  const oneMonthAgo = new Date(today.getTime() - (30 * 24 * 60 * 60 * 1000));
-  const businessDays = getBusinessDays(oneMonthAgo, today);
+  const startDate = new Date(today.getTime() - (monthsToCheck * 30 * 24 * 60 * 60 * 1000));
+  const businessDays = getBusinessDays(startDate, today);
   
   const missingDays = getMissingRegistrations(existingDates, businessDays);
   
   console.log('\n====================================');
-  console.log(`DÍAS HÁBILES SIN REGISTRO: ${missingDays.length}`);
+  console.log(`DÍAS HÁBILES SIN REGISTRO (últimos ${monthsToCheck} mes(es)): ${missingDays.length}`);
   console.log('====================================');
   
   if (missingDays.length === 0) {
@@ -759,6 +779,26 @@ const registerBulkMissingDays = async (page, browser, company, usernameDaybeat, 
   console.log('====================================');
   console.log('REGISTRO MASIVO DE DÍAS SIN REGISTRO');
   console.log('====================================');
+  
+  console.log('\nSeleccione el período a registrar:');
+  console.log('1. Último mes');
+  console.log('2. Últimos 2 meses');
+  console.log('3. Últimos 3 meses');
+  
+  const periodOption = await new Promise((resolve) => {
+    rl.question('Seleccione opción (1/2/3): ', (answer) => {
+      resolve(answer);
+    });
+  });
+  
+  let monthsToCheck = 1;
+  if (periodOption === '2') {
+    monthsToCheck = 2;
+  } else if (periodOption === '3') {
+    monthsToCheck = 3;
+  }
+  
+  console.log(`\nPeríodo seleccionado: ${monthsToCheck} mes(es)`);
   
   let frameTree = page.frames().find(frame => frame.name() === 'tres');
   
@@ -889,13 +929,13 @@ const registerBulkMissingDays = async (page, browser, company, usernameDaybeat, 
   console.log(`\n\nTotal de registros encontrados: ${existingDates.length}`);
   
   const today = new Date();
-  const oneMonthAgo = new Date(today.getTime() - (30 * 24 * 60 * 60 * 1000));
-  const businessDays = getBusinessDays(oneMonthAgo, today);
+  const startDate = new Date(today.getTime() - (monthsToCheck * 30 * 24 * 60 * 60 * 1000));
+  const businessDays = getBusinessDays(startDate, today);
   
   const missingDays = getMissingRegistrations(existingDates, businessDays);
   
   console.log('\n====================================');
-  console.log(`DÍAS HÁBILES SIN REGISTRO: ${missingDays.length}`);
+  console.log(`DÍAS HÁBILES SIN REGISTRO (últimos ${monthsToCheck} mes(es)): ${missingDays.length}`);
   console.log('====================================');
   
   if (missingDays.length === 0) {
