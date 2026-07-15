@@ -111,6 +111,127 @@ Para programar la ejecución del archivo `.bat`:
 
 Con esto ya tienes programada la ejecución del proyecto todos los días a las 5:10pm.
 
+## Ejecución en Linux
+
+### Instalación de Node.js
+
+**Ubuntu/Debian:**
+```bash
+# Usando nvm (recomendado)
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.0/install.sh | bash
+source ~/.bashrc
+nvm install 18
+nvm use 18
+
+# O usando apt
+sudo apt update
+sudo apt install nodejs npm
+```
+
+**CentOS/RHEL:**
+```bash
+# Usando nvm (recomendado)
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.0/install.sh | bash
+source ~/.bashrc
+nvm install 18
+nvm use 18
+
+# O usando yum
+sudo yum install nodejs npm
+```
+
+### Ejecución manual
+
+```bash
+cd puppeteer-daybeat
+npm install
+node index.js
+```
+
+### Programación con cron
+
+Para ejecutar el script automáticamente en Linux usando cron:
+
+```bash
+# Editar crontab
+crontab -e
+
+# Agregar línea para ejecutar todos los días a las 5:10pm
+10 17 * * * cd /ruta/al/proyecto/puppeteer-daybeat && /usr/bin/node index.js >> /var/log/daybeat.log 2>&1
+```
+
+**Nota:** El script es interactivo y requiere intervención del usuario, por lo que la programación automática con cron no es recomendada para este caso de uso.
+
+## Guía de uso manual paso a paso
+
+### Opción 1: Registrar actividad
+
+1. **Selecciona opción 1** en el menú principal
+2. **Selecciona la sección** donde registrar (ej: "Desarrollo Inttegrio rest")
+3. **Selecciona el item** dentro de la sección (ej: "Microsevicios InttegrioRest Java 21")
+4. **Selecciona la categoría** (ej: "Técnico (Desar-Mante-Sopor)")
+5. **Selecciona el tipo de transacción** (ej: "PRI/NE - 15-Ejecución Desarrollo y mantenimiento")
+6. **Selecciona el modo de registro:**
+   - **1. Automático**: El script busca commits de hoy en `ROOT_DIR`
+     - Si hay commits: genera título y descripción automáticamente
+     - Si no hay commits: usa commits de los últimos 7 días
+     - Muestra vista previa y pide confirmación
+   - **2. Con IA (Gemini)**: Usa Gemini AI para generar contenido
+     - Requiere `GEMINI_API_KEY` configurado
+     - Si no hay commits del día: usa commits de los últimos 3 días
+     - Si falla la IA: usa método por defecto
+     - Muestra "✓ Generado con Gemini AI" o "✗ IA falló, usando método por defecto"
+   - **3. Automático fake**: Usa commits de los últimos 7 días
+     - Genera resumen estructurado basado en commits recientes
+     - Muestra vista previa y pide confirmación
+   - **4. Manual**: Ingresa todos los datos manualmente
+     - Título de la actividad
+     - Fecha (formato ddmmyyyy)
+     - Hora de inicio y fin (formato sin puntos, ej: 0730)
+     - Detalle de la actividad
+7. **Confirma o rechaza** los datos generados
+   - Si confirmas: se registra la actividad
+   - Si rechazas: cambia a modo manual para ingresar datos
+
+### Opción 2: Ver días sin registro
+
+1. **Selecciona opción 2** en el menú principal
+2. **Selecciona el período** a consultar:
+   - 1. Último mes
+   - 2. Últimos 2 meses
+   - 3. Últimos 3 meses
+3. **El script escanea automáticamente** todos los proyectos e items de Daybeat
+4. **Muestra la lista** de días hábiles sin registro en el período seleccionado
+5. **El script termina** y cierra el navegador
+
+### Opción 3: Registro masivo de días sin registro
+
+1. **Selecciona opción 3** en el menú principal
+2. **Selecciona el período** a registrar:
+   - 1. Último mes
+   - 2. Últimos 2 meses
+   - 3. Últimos 3 meses
+3. **El script escanea** todos los proyectos e items para encontrar días sin registro
+4. **Muestra la lista** de días hábiles sin registro
+5. **Selecciona la sección** donde registrar (una sola vez para todos los días)
+6. **Selecciona el item** dentro de la sección
+7. **Selecciona la categoría**
+8. **Selecciona el tipo de transacción**
+9. **Confirma** que deseas continuar con el registro masivo
+10. **El script registra automáticamente** cada día sin registro:
+    - Para cada día:
+      - Busca commits de ese día específico
+      - Si no hay commits: usa commits de los últimos 3 días antes de esa fecha
+      - Si hay `GEMINI_API_KEY`: usa Gemini AI para generar título y descripción
+      - Si no hay API key o falla: usa método por defecto
+      - Registra la transacción con el horario guardado
+      - Muestra progreso: "✓ Día 15/07/2026 registrado exitosamente" o "✗ Día 15/07/2026 falló"
+11. **Muestra resumen final** con:
+    - Total de días sin registro encontrados
+    - Días registrados exitosamente
+    - Días ya registrados (saltados)
+    - Días con error (si los hay)
+
 ## Archivos generados
 
 | Archivo | Descripción |
