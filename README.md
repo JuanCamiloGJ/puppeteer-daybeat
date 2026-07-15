@@ -40,14 +40,14 @@ ROOT_DIR='ruta raiz donde buscar repositorios git'
 ```env
 GIT_AUTHOR_EMAIL='email del autor para filtrar commits'
 GEMINI_API_KEY='tu api key de google gemini'
-GEMINI_MODEL='gemini-3.5-flash'
+GEMINI_MODEL='gemini-3.1-flash-lite'
 ```
 
 | Variable | Descripción | Por defecto |
 |----------|-------------|-------------|
 | `GIT_AUTHOR_EMAIL` | Filtra commits por este autor. Si no se define, usa `git config user.email` del primer repositorio encontrado. | - |
 | `GEMINI_API_KEY` | API key de Google Gemini para generar títulos y descripciones con IA. Si no se define, se usa el método por defecto basado en reglas. | - |
-| `GEMINI_MODEL` | Modelo de Gemini a usar. | `gemini-3.5-flash` |
+| `GEMINI_MODEL` | Modelo de Gemini a usar. | `gemini-3.1-flash-lite` |
 
 ## Uso
 

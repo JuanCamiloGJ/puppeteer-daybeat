@@ -566,7 +566,7 @@ const generateFakeSummary = (commits) => {
 
 const generateWithGemini = async (commits, context = 'same-day', targetDate = null) => {
   const apiKey = process.env.GEMINI_API_KEY;
-  const model = process.env.GEMINI_MODEL || 'gemini-3.5-flash';
+  const model = process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite';
   
   if (!apiKey) {
     return null;

@@ -14,7 +14,6 @@ const testGeminiAPI = async () => {
   console.log(`API Key: ${apiKey.substring(0, 10)}...${apiKey.substring(apiKey.length - 5)}`);
   console.log('');
   
-  // Mock de commits para prueba
   const mockCommits = [
     'feat: agregar autenticación de usuarios',
     'fix: corregir error en validación de formularios',
@@ -33,8 +32,9 @@ ${mockCommits.join('\n')}
 Responde SOLO en formato JSON válido, sin texto adicional:
 {"title": "título corto aquí", "detail": "descripción detallada aquí"}`;
   
-  // Modelos a probar (ordenados por probabilidad de ser gratuitos)
   const models = [
+    'gemini-3.1-flash-lite',
+    'gemini-3.5-flash',
     'gemini-2.0-flash',
     'gemini-2.0-flash-exp',
     'gemini-1.5-flash',
@@ -52,71 +52,95 @@ Responde SOLO en formato JSON válido, sin texto adicional:
     console.log(`Probando modelo: ${model}`);
     console.log(`------------------------------------`);
     
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+    const url = 'https://generativelanguage.googleapis.com/v1beta/interactions';
     console.log(`URL: ${url}`);
+    console.log(`[IA] Usando modelo: ${model}`);
     
-    try {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          contents: [{
-            parts: [{
-              text: prompt
-            }]
-          }],
-          generationConfig: {
-            temperature: 0.7,
-            maxOutputTokens: 1024
-          }
-        }),
-        signal: AbortSignal.timeout(15000)
-      });
+    const maxRetries = 4;
+    const baseDelay = 2000;
+    let success = false;
+    
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      console.log(`[IA] Intento ${attempt}/${maxRetries}...`);
       
-      console.log(`Status: ${response.status} ${response.statusText}`);
+      const startTime = Date.now();
       
-      const data = await response.json();
-      
-      if (!response.ok) {
-        console.log(`Error: ${JSON.stringify(data.error || data, null, 2)}`);
-        continue;
-      }
-      
-      // Intentar extraer el texto de la respuesta
-      const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-      
-      if (!text) {
-        console.log('Respuesta completa:', JSON.stringify(data, null, 2));
-        console.log('No se encontró texto en la respuesta');
-        continue;
-      }
-      
-      console.log(`\n✓ ÉXITO con modelo: ${model}`);
-      console.log(`\nRespuesta de la IA:`);
-      console.log(text);
-      
-      // Intentar parsear JSON
       try {
-        const jsonMatch = text.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-          const result = JSON.parse(jsonMatch[0]);
-          console.log(`\nJSON parseado:`);
-          console.log(`Title: ${result.title}`);
-          console.log(`Detail: ${result.detail}`);
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-goog-api-key': apiKey
+          },
+          body: JSON.stringify({
+            model: model,
+            input: prompt
+          }),
+          signal: AbortSignal.timeout(60000)
+        });
+        
+        const responseTime = Date.now() - startTime;
+        console.log(`[IA] Respuesta recibida en ${responseTime}ms`);
+        console.log(`Status: ${response.status} ${response.statusText}`);
+        
+        const data = await response.json();
+        
+        if (!response.ok) {
+          const errorBody = JSON.stringify(data.error || data, null, 2);
+          console.log(`Error: ${errorBody.substring(0, 200)}`);
+          
+          if (response.status === 503 && attempt < maxRetries) {
+            const delay = baseDelay * Math.pow(2, attempt - 1);
+            console.log(`[IA] Reintentando en ${delay/1000}s...`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+            continue;
+          }
+          break;
         }
-      } catch (parseErr) {
-        console.log(`\nNo se pudo parsear JSON: ${parseErr.message}`);
+        
+        const outputStep = data.steps?.find(step => step.type === 'model_output');
+        const text = outputStep?.content?.[0]?.text;
+        
+        if (!text) {
+          console.log('Respuesta completa:', JSON.stringify(data, null, 2).substring(0, 500));
+          console.log('No se encontró texto en la respuesta');
+          break;
+        }
+        
+        console.log(`\n✓ ÉXITO con modelo: ${model}`);
+        console.log(`\nRespuesta de la IA:`);
+        console.log(text);
+        
+        try {
+          const jsonMatch = text.match(/\{[\s\S]*\}/);
+          if (jsonMatch) {
+            const result = JSON.parse(jsonMatch[0]);
+            console.log(`\nJSON parseado:`);
+            console.log(`Title: ${result.title}`);
+            console.log(`Detail: ${result.detail}`);
+          }
+        } catch (parseErr) {
+          console.log(`\nNo se pudo parsear JSON: ${parseErr.message}`);
+        }
+        
+        workingModel = model;
+        success = true;
+        break;
+        
+      } catch (err) {
+        console.log(`Error de conexión: ${err.message}`);
+        
+        if (attempt < maxRetries) {
+          const delay = baseDelay * Math.pow(2, attempt - 1);
+          console.log(`[IA] Reintentando en ${delay/1000}s...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+          continue;
+        }
+        break;
       }
-      
-      workingModel = model;
-      break;
-      
-    } catch (err) {
-      console.log(`Error de conexión: ${err.message}`);
-      continue;
     }
+    
+    if (success) break;
   }
   
   console.log('\n====================================');
