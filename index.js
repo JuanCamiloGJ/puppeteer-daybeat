@@ -751,14 +751,55 @@ const getMissingRegistrations = (existingDates, businessDays) => {
   return businessDays.filter(day => !existingDates.includes(day));
 };
 
-const extractRegistrations = async (frameTree, startDate = null) => {
+const getCurrentUser = async (page) => {
+  try {
+    const frameOne = page.frames().find(frame => frame.name() === 'uno');
+    if (!frameOne) {
+      console.log('[DEBUG] Frame "uno" no encontrado para extraer usuario');
+      return null;
+    }
+    
+    const userName = await frameOne.evaluate(() => {
+      // Buscar en todo el documento elementos que puedan contener el nombre del usuario
+      // Generalmente está en la parte inferior del menú lateral
+      const allElements = Array.from(document.querySelectorAll('*'));
+      
+      // Buscar patrones comunes de nombres (ej: "Juan C. Garcia J.")
+      for (const el of allElements) {
+        const text = el.textContent.trim();
+        // Patrón: Nombre con al menos 2 palabras, cada una empezando con mayúscula
+        // Ej: "Juan C. Garcia J." o "Juan Carlos Garcia"
+        if (text.match(/^[A-Z][a-záéíóú]+\s+[A-Z]\.?\s*[A-Z][a-záéíóú]+/)) {
+          // Evitar textos muy largos o con números
+          if (text.length < 50 && !text.match(/\d/)) {
+            return text;
+          }
+        }
+      }
+      
+      return null;
+    });
+    
+    if (userName) {
+      console.log(`[DEBUG] Usuario logueado detectado: "${userName}"`);
+    } else {
+      console.log('[DEBUG] No se pudo detectar el usuario logueado automáticamente');
+    }
+    
+    return userName;
+  } catch (err) {
+    console.log('[DEBUG] Error extrayendo usuario:', err.message);
+    return null;
+  }
+};
+
+const extractRegistrations = async (frameTree, startDate = null, currentUser = null) => {
   try {
     const allDates = [];
     let currentPage = 1;
     let hasNextPage = true;
-    const MAX_PAGES = 5; // Límite de 5 páginas máximo
+    const MAX_PAGES = 5;
     
-    // Convertir startDate a formato comparable (DD/MM/YYYY -> timestamp)
     let startTimestamp = null;
     if (startDate) {
       const [dd, mm, yyyy] = startDate.split('/');
@@ -767,7 +808,7 @@ const extractRegistrations = async (frameTree, startDate = null) => {
     
     while (hasNextPage && currentPage <= MAX_PAGES) {
       console.log(`      [DEBUG] Extrayendo página ${currentPage}...`);
-      const registrations = await frameTree.evaluate(() => {
+      const registrations = await frameTree.evaluate((currentUser) => {
         const dates = [];
         const tables = document.querySelectorAll('table');
         
@@ -777,6 +818,7 @@ const extractRegistrations = async (frameTree, startDate = null) => {
           
           const headers = Array.from(headerRow.querySelectorAll('td, th')).map(h => h.textContent.trim());
           const fechaIndex = headers.findIndex(h => h.includes('Fecha Transacción'));
+          const usuarioIndex = headers.findIndex(h => h.includes('Usuario Transacción'));
           
           if (fechaIndex === -1) continue;
           
@@ -784,6 +826,14 @@ const extractRegistrations = async (frameTree, startDate = null) => {
           for (let i = 1; i < rows.length; i++) {
             const cells = rows[i].querySelectorAll('td');
             if (cells.length > fechaIndex) {
+              // Si hay currentUser y columna de usuario, filtrar
+              if (currentUser && usuarioIndex !== -1 && cells.length > usuarioIndex) {
+                const usuarioText = cells[usuarioIndex].textContent.trim();
+                if (usuarioText !== currentUser) {
+                  continue; // Saltar si no es el usuario logueado
+                }
+              }
+              
               const fechaText = cells[fechaIndex].textContent.trim();
               const match = fechaText.match(/(\d{4})-(\d{1,2})-(\d{1,2})/);
               if (match) {
@@ -797,26 +847,23 @@ const extractRegistrations = async (frameTree, startDate = null) => {
         }
         
         return dates;
-      });
+      }, currentUser);
       
       console.log(`      [DEBUG] Página ${currentPage}: ${registrations.length} fechas encontradas`);
       if (registrations.length > 0) {
         console.log(`      [DEBUG] Fechas: ${registrations.join(', ')}`);
       }
       
-      // Filtrar fechas y verificar si debemos detener la paginación
       let allDatesOutOfRange = true;
       
       for (const dateStr of registrations) {
         const [dd, mm, yyyy] = dateStr.split('/');
         const dateTimestamp = new Date(`${yyyy}-${mm}-${dd}`).getTime();
         
-        // Si no hay startDate, agregar todas las fechas
         if (!startTimestamp) {
           allDates.push(dateStr);
           allDatesOutOfRange = false;
         } else {
-          // Solo agregar fechas dentro del rango
           if (dateTimestamp >= startTimestamp) {
             allDates.push(dateStr);
             allDatesOutOfRange = false;
@@ -824,7 +871,6 @@ const extractRegistrations = async (frameTree, startDate = null) => {
         }
       }
       
-      // Si todas las fechas de esta página están fuera del rango, detener paginación
       if (startTimestamp && registrations.length > 0 && allDatesOutOfRange) {
         console.log(`      [DEBUG] Todas las fechas están fuera del rango, deteniendo paginación`);
         break;
@@ -992,6 +1038,14 @@ const showMissingRegistrations = async (page, browser, company, usernameDaybeat,
   console.log('Login completado, esperando carga de página...');
   await delay(3000);
   
+  // Obtener el nombre del usuario logueado para filtrar registros
+  const currentUser = await getCurrentUser(page);
+  if (currentUser) {
+    console.log(`\n[INFO] Filtrando registros del usuario: ${currentUser}`);
+  } else {
+    console.log('\n[WARN] No se pudo detectar el usuario, mostrando todos los registros');
+  }
+  
   const frameOne = page.frames().find(frame => frame.name() === 'uno');
   if (!frameOne) {
     console.log('ERROR: Frame "uno" no encontrado');
@@ -1092,8 +1146,8 @@ const showMissingRegistrations = async (page, browser, company, usernameDaybeat,
       await frameTree.waitForNavigation();
       await delay(1500);
       
-      // Extraer fechas de las transacciones (con paginación limitada al rango)
-      const dates = await extractRegistrations(frameTree, startDateStr);
+      // Extraer fechas de las transacciones (con paginación limitada al rango y filtrado por usuario)
+      const dates = await extractRegistrations(frameTree, startDateStr, currentUser);
       console.log(`    Transacciones encontradas: ${dates.length}`);
       allDates.push(...dates);
       
@@ -1187,6 +1241,14 @@ const registerBulkMissingDays = async (page, browser, company, usernameDaybeat, 
   console.log('Login completado, esperando carga de página...');
   await delay(3000);
   
+  // Obtener el nombre del usuario logueado para filtrar registros
+  const currentUser = await getCurrentUser(page);
+  if (currentUser) {
+    console.log(`\n[INFO] Filtrando registros del usuario: ${currentUser}`);
+  } else {
+    console.log('\n[WARN] No se pudo detectar el usuario, mostrando todos los registros');
+  }
+  
   const frameOne = page.frames().find(frame => frame.name() === 'uno');
   if (!frameOne) {
     console.log('ERROR: Frame "uno" no encontrado');
@@ -1279,7 +1341,7 @@ const registerBulkMissingDays = async (page, browser, company, usernameDaybeat, 
       await frameTree.waitForNavigation();
       await delay(1500);
       
-      const dates = await extractRegistrations(frameTree, startDateStr);
+      const dates = await extractRegistrations(frameTree, startDateStr, currentUser);
       console.log(`    Transacciones encontradas: ${dates.length}`);
       if (dates.length > 0) {
         console.log(`    Fechas: ${dates.join(', ')}`);
