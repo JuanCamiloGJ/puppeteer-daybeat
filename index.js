@@ -751,7 +751,7 @@ const getMissingRegistrations = (existingDates, businessDays) => {
   return businessDays.filter(day => !existingDates.includes(day));
 };
 
-const getCurrentUser = async (page) => {
+const getCurrentUser = async (page, rl = null) => {
   try {
     const frameOne = page.frames().find(frame => frame.name() === 'uno');
     if (!frameOne) {
@@ -760,33 +760,39 @@ const getCurrentUser = async (page) => {
     }
     
     const userName = await frameOne.evaluate(() => {
-      // Buscar en todo el documento elementos que puedan contener el nombre del usuario
-      // Generalmente está en la parte inferior del menú lateral
-      const allElements = Array.from(document.querySelectorAll('*'));
-      
-      // Buscar patrones comunes de nombres (ej: "Juan C. Garcia J.")
-      for (const el of allElements) {
-        const text = el.textContent.trim();
-        // Patrón: Nombre con al menos 2 palabras, cada una empezando con mayúscula
-        // Ej: "Juan C. Garcia J." o "Juan Carlos Garcia"
-        if (text.match(/^[A-Z][a-záéíóú]+\s+[A-Z]\.?\s*[A-Z][a-záéíóú]+/)) {
-          // Evitar textos muy largos o con números
-          if (text.length < 50 && !text.match(/\d/)) {
-            return text;
-          }
-        }
+      const td = document.querySelector('td.titclientev');
+      if (td) {
+        return td.textContent.trim().replace(/\s+$/, '');
       }
-      
       return null;
     });
     
     if (userName) {
       console.log(`[DEBUG] Usuario logueado detectado: "${userName}"`);
-    } else {
-      console.log('[DEBUG] No se pudo detectar el usuario logueado automáticamente');
+      return userName;
     }
     
-    return userName;
+    console.log('[DEBUG] No se encontró td.titclientev');
+    
+    // Fallback: preguntar al usuario
+    if (rl) {
+      console.log('\nNo se pudo detectar el usuario automáticamente.');
+      const manualUser = await new Promise((resolve) => {
+        rl.question('Ingresa el nombre exacto que aparece en la columna "Usuario Transacción" (o presiona Enter para omitir): ', (answer) => {
+          resolve(answer.trim() || null);
+        });
+      });
+      
+      if (manualUser) {
+        console.log(`[DEBUG] Usuario ingresado manualmente: "${manualUser}"`);
+      } else {
+        console.log('[DEBUG] Usuario omitido, mostrando todos los registros');
+      }
+      
+      return manualUser;
+    }
+    
+    return null;
   } catch (err) {
     console.log('[DEBUG] Error extrayendo usuario:', err.message);
     return null;
@@ -1039,11 +1045,11 @@ const showMissingRegistrations = async (page, browser, company, usernameDaybeat,
   await delay(3000);
   
   // Obtener el nombre del usuario logueado para filtrar registros
-  const currentUser = await getCurrentUser(page);
+  const currentUser = await getCurrentUser(page, rl);
   if (currentUser) {
     console.log(`\n[INFO] Filtrando registros del usuario: ${currentUser}`);
   } else {
-    console.log('\n[WARN] No se pudo detectar el usuario, mostrando todos los registros');
+    console.log('\n[WARN] No se especificó usuario, mostrando todos los registros');
   }
   
   const frameOne = page.frames().find(frame => frame.name() === 'uno');
@@ -1242,11 +1248,11 @@ const registerBulkMissingDays = async (page, browser, company, usernameDaybeat, 
   await delay(3000);
   
   // Obtener el nombre del usuario logueado para filtrar registros
-  const currentUser = await getCurrentUser(page);
+  const currentUser = await getCurrentUser(page, rl);
   if (currentUser) {
     console.log(`\n[INFO] Filtrando registros del usuario: ${currentUser}`);
   } else {
-    console.log('\n[WARN] No se pudo detectar el usuario, mostrando todos los registros');
+    console.log('\n[WARN] No se especificó usuario, mostrando todos los registros');
   }
   
   const frameOne = page.frames().find(frame => frame.name() === 'uno');
