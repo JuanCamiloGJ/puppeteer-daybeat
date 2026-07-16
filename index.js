@@ -753,26 +753,38 @@ const getMissingRegistrations = (existingDates, businessDays) => {
 
 const getCurrentUser = async (page, rl = null) => {
   try {
-    const frameOne = page.frames().find(frame => frame.name() === 'uno');
-    if (!frameOne) {
-      console.log('[DEBUG] Frame "uno" no encontrado para extraer usuario');
-      return null;
-    }
+    // Buscar en todos los frames para mayor robustez
+    const frames = page.frames();
     
-    const userName = await frameOne.evaluate(() => {
-      const td = document.querySelector('td.titclientev');
-      if (td) {
-        return td.textContent.trim().replace(/\s+$/, '');
+    for (const frame of frames) {
+      const userName = await frame.evaluate(() => {
+        // Intentar selector más específico primero
+        const specificTd = document.querySelector('table.cliente td.titclientev');
+        if (specificTd) {
+          return specificTd.textContent.replace(/&nbsp;/g, '').trim();
+        }
+        
+        // Fallback: buscar cualquier td con clase titclientev
+        const allTd = document.querySelectorAll('td.titclientev');
+        for (const el of allTd) {
+          const text = el.textContent.replace(/&nbsp;/g, '').trim();
+          // El nombre del usuario típicamente tiene formato "Nombre Apellido" o "Nombre A. Apellido"
+          if (text.match(/^[A-Z][a-záéíóú]+\s+[A-Z]/)) {
+            return text;
+          }
+        }
+        
+        return null;
+      });
+      
+      if (userName) {
+        console.log(`[DEBUG] Usuario detectado en frame: "${frame.name()}"`);
+        console.log(`[DEBUG] Usuario logueado: "${userName}"`);
+        return userName;
       }
-      return null;
-    });
-    
-    if (userName) {
-      console.log(`[DEBUG] Usuario logueado detectado: "${userName}"`);
-      return userName;
     }
     
-    console.log('[DEBUG] No se encontró td.titclientev');
+    console.log('[DEBUG] No se encontró td.titclientev en ningún frame');
     
     // Fallback: preguntar al usuario
     if (rl) {
