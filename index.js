@@ -758,17 +758,26 @@ const getCurrentUser = async (page, rl = null) => {
     
     for (const frame of frames) {
       const userName = await frame.evaluate(() => {
-        // Intentar selector más específico primero
-        const specificTd = document.querySelector('table.cliente td.titclientev');
-        if (specificTd) {
-          return specificTd.textContent.replace(/&nbsp;/g, '').trim();
+        // Buscar el td que contiene "Usuario:" y tomar el siguiente td hermano
+        const allLabels = document.querySelectorAll('td.titcliente');
+        
+        for (const label of allLabels) {
+          const text = label.textContent.replace(/&nbsp;/g, '').trim();
+          if (text === 'Usuario:') {
+            // Tomar el siguiente td hermano
+            const nextTd = label.nextElementSibling;
+            if (nextTd && nextTd.tagName === 'TD') {
+              return nextTd.textContent.replace(/&nbsp;/g, '').trim();
+            }
+          }
         }
         
-        // Fallback: buscar cualquier td con clase titclientev
+        // Fallback: buscar cualquier td.titclientev con formato de nombre
         const allTd = document.querySelectorAll('td.titclientev');
         for (const el of allTd) {
           const text = el.textContent.replace(/&nbsp;/g, '').trim();
           // El nombre del usuario típicamente tiene formato "Nombre Apellido" o "Nombre A. Apellido"
+          // Excluir textos como "Corporación" que son una sola palabra
           if (text.match(/^[A-Z][a-záéíóú]+\s+[A-Z]/)) {
             return text;
           }
@@ -784,7 +793,7 @@ const getCurrentUser = async (page, rl = null) => {
       }
     }
     
-    console.log('[DEBUG] No se encontró td.titclientev en ningún frame');
+    console.log('[DEBUG] No se encontró el usuario en ningún frame');
     
     // Fallback: preguntar al usuario
     if (rl) {
