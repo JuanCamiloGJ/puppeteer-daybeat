@@ -3,27 +3,37 @@ const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
 
-const findGitRepos = (rootDir) => {
+const SKIP_DIRS = [
+  'node_modules', '.git', '.idea', '.vscode', '__pycache__', 'vendor',
+  '.svn', 'bower_components', 'dist', 'build', '.next', '.nuxt',
+  'payara5', 'inttegrio', 'bin', 'dmp', 'leadtools', '.atl', 'sdd'
+];
+
+const findGitRepos = (rootDir, depth = 0, maxDepth = 3) => {
   const repos = [];
   if (!rootDir || !fs.existsSync(rootDir)) {
     console.log('ERROR: ROOT_DIR no existe o no está configurado.');
     return repos;
   }
 
+  if (depth > maxDepth) return repos;
+
   try {
     const items = fs.readdirSync(rootDir, { withFileTypes: true });
-    
+
     const hasGit = items.some(item => item.isDirectory() && item.name === '.git');
     if (hasGit) {
       repos.push(rootDir);
     }
-    
+
     for (const item of items) {
+      if (!item.isDirectory()) continue;
+      if (item.name.startsWith('.') && item.name !== '.git') continue;
+      if (SKIP_DIRS.includes(item.name)) continue;
+
       const fullPath = path.join(rootDir, item.name);
-      if (item.isDirectory() && item.name !== '.git') {
-        const subRepos = findGitRepos(fullPath);
-        repos.push(...subRepos);
-      }
+      const subRepos = findGitRepos(fullPath, depth + 1, maxDepth);
+      repos.push(...subRepos);
     }
   } catch (err) {
     console.log(`Error accediendo a ${rootDir}: ${err.message}`);
@@ -31,15 +41,96 @@ const findGitRepos = (rootDir) => {
   return repos;
 };
 
+const REPOS_FILE = path.join(__dirname, '.daybeat-repos.json');
+
+const loadRepoCache = () => {
+  try {
+    if (fs.existsSync(REPOS_FILE)) {
+      const data = JSON.parse(fs.readFileSync(REPOS_FILE, 'utf-8'));
+      const ageDays = (Date.now() - new Date(data.lastScan).getTime()) / (1000 * 60 * 60 * 24);
+      if (ageDays < 7) return data;
+    }
+  } catch (err) {}
+  return null;
+};
+
+const saveRepoCache = (repos, rootDir) => {
+  try {
+    fs.writeFileSync(REPOS_FILE, JSON.stringify({
+      rootDir,
+      lastScan: new Date().toISOString(),
+      repos
+    }, null, 2));
+  } catch (err) {}
+};
+
+const getReposWithCache = (rootDir, forceRescan = false) => {
+  if (!forceRescan) {
+    const cached = loadRepoCache();
+    if (cached && cached.rootDir === rootDir) {
+      const valid = cached.repos.filter(r => fs.existsSync(r));
+      if (valid.length > 0) {
+        console.log(`Usando repositorios cacheados (${valid.length})`);
+        return valid;
+      }
+    }
+  }
+  console.log('Escaneando repositorios...');
+  const repos = findGitRepos(rootDir);
+  if (repos.length > 0) saveRepoCache(repos, rootDir);
+  return repos;
+};
+
+const resolveRootDir = (dir) => {
+  if (!dir) return dir;
+
+  const isWindows = process.platform === 'win32';
+
+  if (isWindows && dir.startsWith('/')) {
+    try {
+      const output = execSync('wsl -l -q', { encoding: 'utf-16le', stdio: ['pipe', 'pipe', 'pipe'] });
+      const distros = output.split('\n').map(d => d.replace(/\0/g, '').trim()).filter(Boolean);
+      for (const distro of distros) {
+        const uncBase = `//wsl.localhost/${distro}`;
+        const candidate = `${uncBase}${dir}`;
+        if (fs.existsSync(candidate)) {
+          console.log(`Ruta resuelta: ${dir} -> ${candidate}`);
+          return candidate;
+        }
+      }
+      console.log(`No se encontró distro WSL para la ruta: ${dir}`);
+      console.log(`Distros disponibles: ${distros.join(', ')}`);
+    } catch (err) {
+      console.log(`Error detectando distro WSL: ${err.message}`);
+    }
+    return dir;
+  }
+
+  if (!isWindows && dir.startsWith('//wsl.localhost')) {
+    const parts = dir.split('/').filter(p => p);
+    const linuxPath = '/' + parts.slice(2).join('/');
+    console.log(`Ruta resuelta: ${dir} -> ${linuxPath}`);
+    return linuxPath;
+  }
+
+  if (!isWindows && dir.startsWith('\\\\wsl.localhost')) {
+    const parts = dir.split('\\').filter(p => p);
+    const linuxPath = '/' + parts.slice(2).join('/');
+    console.log(`Ruta resuelta: ${dir} -> ${linuxPath}`);
+    return linuxPath;
+  }
+
+  return dir;
+};
+
 const getGitAuthor = (repos) => {
   if (process.env.GIT_AUTHOR_EMAIL) {
     return process.env.GIT_AUTHOR_EMAIL;
   }
-  
+
   for (const repo of repos) {
     try {
-      const email = execSync('git config user.email', {
-        cwd: repo,
+      const email = execSync(`git -C "${repo}" config user.email`, {
         encoding: 'utf-8',
         stdio: ['pipe', 'pipe', 'pipe']
       }).trim();
@@ -48,7 +139,7 @@ const getGitAuthor = (repos) => {
       continue;
     }
   }
-  
+
   return null;
 };
 
@@ -60,11 +151,11 @@ const getCommitsLast30Days = (repoPath, author = null) => {
     const month = String(pastDate.getMonth() + 1).padStart(2, '0');
     const day = String(pastDate.getDate()).padStart(2, '0');
     const dateStr = `${year}-${month}-${day}`;
-    
+
     const authorFilter = author ? `--author="${author}"` : '';
     const result = execSync(
-      `git log --since="${dateStr}" --all ${authorFilter} --format="%H|%ai|%s"`,
-      { cwd: repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }
+      `git -C "${repoPath}" log --since="${dateStr}" --all ${authorFilter} --format="%H|%ai|%s"`,
+      { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 30000 }
     );
     const lines = result.trim().split('\n').filter(msg => msg.length > 0);
     return lines.map(line => {
@@ -75,17 +166,19 @@ const getCommitsLast30Days = (repoPath, author = null) => {
       return { hash, date, message };
     });
   } catch (err) {
+    console.log(`  Error obteniendo commits en ${repoPath}: ${err.message}`);
     return [];
   }
 };
 
-const rootDir = process.env.ROOT_DIR;
+const forceRescan = process.argv.includes('--rescan');
+const rootDir = resolveRootDir(process.env.ROOT_DIR);
 console.log('====================================');
 console.log('DIAGNÓSTICO DE COMMITS - ÚLTIMOS 30 DÍAS');
 console.log('====================================\n');
 
 console.log('ROOT_DIR:', rootDir);
-const repos = findGitRepos(rootDir);
+const repos = getReposWithCache(rootDir, forceRescan);
 console.log(`Repositorios encontrados: ${repos.length}\n`);
 
 const author = getGitAuthor(repos);
@@ -104,13 +197,13 @@ const commitsByDate = {};
 
 for (const repo of repos) {
   const commits = getCommitsLast30Days(repo, author);
-  
+
   if (commits.length > 0) {
     console.log(`\n${repo} (${commits.length} commits):`);
     for (const commit of commits.slice(0, 5)) {
       const date = commit.date.split(' ')[0];
       console.log(`  ${date} - ${commit.message.substring(0, 60)}`);
-      
+
       if (!commitsByDate[date]) {
         commitsByDate[date] = [];
       }

@@ -8,11 +8,12 @@ Single-file Node.js Puppeteer script that automates daily task/time registration
 
 - **Run:** `node index.js`
 - **Install:** `npm install`
+- **Rescan repos:** `node index.js --rescan` or `node diagnostic-commits.js --rescan`
 - No tests, lint, typecheck, or build steps exist.
 
 ## Environment
 
-Requires `.env` (see `.env.example`) with: `LINK_DAYBEAT`, `COMPANY`, `USERNAME_DAYBEAT`, `PASSWORD`, `ROOT_DIR`. The script exits early if any of the first four are missing. `ROOT_DIR` is the directory where the script recursively searches for git repositories to extract commit information. Optional: `GIT_AUTHOR_EMAIL` to filter commits by author (falls back to `git config user.email` from the first valid repo).
+Requires `.env` (see `.env.example`) with: `LINK_DAYBEAT`, `COMPANY`, `USERNAME_DAYBEAT`, `PASSWORD`, `ROOT_DIR`. The script exits early if any of the first four are missing. `ROOT_DIR` is the directory where the script recursively searches for git repositories to extract commit information. Accepts both Linux paths (`/home/user/repos`) and Windows UNC paths (`//wsl.localhost/distro/home/user/repos`) — auto-detects the platform and converts. Use Linux paths if running from WSL, or UNC paths if running from Windows/Git Bash. Optional: `GIT_AUTHOR_EMAIL` to filter commits by author (falls back to `git config user.email` from the first valid repo).
 
 Optional AI configuration:
 - `GEMINI_API_KEY`: API key for Google Gemini AI. If provided, enables AI-generated summaries.
@@ -110,4 +111,15 @@ When `GEMINI_API_KEY` is configured, the script can use Google Gemini AI to gene
 
 ## Persistence
 
-`.daybeat-history.json` stores the last-used start/end times for fake mode. Added to `.gitignore`.
+- `.daybeat-history.json`: stores the last-used start/end times for fake mode.
+- `.daybeat-repos.json`: caches discovered git repositories (auto-refresh after 7 days). Supports `--rescan` flag to force refresh. Added to `.gitignore`.
+- `holidays.json`: stores holidays for the current year (format: `{ "year": 2026, "holidays": ["DD/MM/YYYY", ...] }`). Auto-prompts for update when year changes. Shared between users (not in `.gitignore`).
+
+## Main menu
+
+The main menu includes:
+1. Registrar actividad
+2. Ver días sin registro
+3. Registro masivo de días sin registro
+4. **Re-escanear repositorios** — forces cache refresh and shows updated repo list
+5. Salir

@@ -12,6 +12,49 @@ const rl = readline.createInterface({
   output: process.stdout
 });
 
+// Resolución de rutas WSL/Windows
+const resolveRootDir = (dir) => {
+  if (!dir) return dir;
+
+  const isWindows = process.platform === 'win32';
+
+  if (isWindows && dir.startsWith('/')) {
+    try {
+      const output = execSync('wsl -l -q', { encoding: 'utf-16le', stdio: ['pipe', 'pipe', 'pipe'] });
+      const distros = output.split('\n').map(d => d.replace(/\0/g, '').trim()).filter(Boolean);
+      for (const distro of distros) {
+        const uncBase = `//wsl.localhost/${distro}`;
+        const candidate = `${uncBase}${dir}`;
+        if (fs.existsSync(candidate)) {
+          console.log(`Ruta resuelta: ${dir} -> ${candidate}`);
+          return candidate;
+        }
+      }
+      console.log(`No se encontró distro WSL para la ruta: ${dir}`);
+      console.log(`Distros disponibles: ${distros.join(', ')}`);
+    } catch (err) {
+      console.log(`Error detectando distro WSL: ${err.message}`);
+    }
+    return dir;
+  }
+
+  if (!isWindows && dir.startsWith('//wsl.localhost')) {
+    const parts = dir.split('/').filter(p => p);
+    const linuxPath = '/' + parts.slice(2).join('/');
+    console.log(`Ruta resuelta: ${dir} -> ${linuxPath}`);
+    return linuxPath;
+  }
+
+  if (!isWindows && dir.startsWith('\\\\wsl.localhost')) {
+    const parts = dir.split('\\').filter(p => p);
+    const linuxPath = '/' + parts.slice(2).join('/');
+    console.log(`Ruta resuelta: ${dir} -> ${linuxPath}`);
+    return linuxPath;
+  }
+
+  return dir;
+};
+
 // Funciones auxiliares.
 
 const listElements = async (frame, selector) => {
@@ -162,31 +205,81 @@ const questionUserResponse = async (frame, question) => {
 
 // Funciones de automatización basadas en commits
 
-const findGitRepos = (rootDir) => {
+const SKIP_DIRS = [
+  'node_modules', '.git', '.idea', '.vscode', '__pycache__', 'vendor',
+  '.svn', 'bower_components', 'dist', 'build', '.next', '.nuxt',
+  'payara5', 'inttegrio', 'bin', 'dmp', 'leadtools', '.atl', 'sdd'
+];
+
+const findGitRepos = (rootDir, depth = 0, maxDepth = 3) => {
   const repos = [];
   if (!rootDir || !fs.existsSync(rootDir)) {
     console.log('ERROR: ROOT_DIR no existe o no está configurado.');
     return repos;
   }
 
+  if (depth > maxDepth) return repos;
+
   try {
     const items = fs.readdirSync(rootDir, { withFileTypes: true });
-    
+
     const hasGit = items.some(item => item.isDirectory() && item.name === '.git');
     if (hasGit) {
       repos.push(rootDir);
     }
-    
+
     for (const item of items) {
+      if (!item.isDirectory()) continue;
+      if (item.name.startsWith('.') && item.name !== '.git') continue;
+      if (SKIP_DIRS.includes(item.name)) continue;
+
       const fullPath = path.join(rootDir, item.name);
-      if (item.isDirectory() && item.name !== '.git') {
-        const subRepos = findGitRepos(fullPath);
-        repos.push(...subRepos);
-      }
+      const subRepos = findGitRepos(fullPath, depth + 1, maxDepth);
+      repos.push(...subRepos);
     }
   } catch (err) {
     console.log(`Error accediendo a ${rootDir}: ${err.message}`);
   }
+  return repos;
+};
+
+const REPOS_FILE = path.join(__dirname, '.daybeat-repos.json');
+
+const loadRepoCache = () => {
+  try {
+    if (fs.existsSync(REPOS_FILE)) {
+      const data = JSON.parse(fs.readFileSync(REPOS_FILE, 'utf-8'));
+      const ageDays = (Date.now() - new Date(data.lastScan).getTime()) / (1000 * 60 * 60 * 24);
+      if (ageDays < 7) return data;
+    }
+  } catch (err) {}
+  return null;
+};
+
+const saveRepoCache = (repos, rootDir) => {
+  try {
+    fs.writeFileSync(REPOS_FILE, JSON.stringify({
+      rootDir,
+      lastScan: new Date().toISOString(),
+      repos
+    }, null, 2));
+  } catch (err) {}
+};
+
+const getReposWithCache = (rootDir, forceRescan = false) => {
+  if (!forceRescan) {
+    const cached = loadRepoCache();
+    if (cached && cached.rootDir === rootDir) {
+      const valid = cached.repos.filter(r => fs.existsSync(r));
+      if (valid.length > 0) {
+        console.log(`Usando repositorios cacheados (${valid.length})`);
+        return valid;
+      }
+    }
+  }
+  console.log('Escaneando repositorios...');
+  const repos = findGitRepos(rootDir);
+  if (repos.length > 0) saveRepoCache(repos, rootDir);
   return repos;
 };
 
@@ -197,8 +290,7 @@ const getGitAuthor = (repos) => {
   
   for (const repo of repos) {
     try {
-      const email = execSync('git config user.email', {
-        cwd: repo,
+      const email = execSync(`git -C "${repo}" config user.email`, {
         encoding: 'utf-8',
         stdio: ['pipe', 'pipe', 'pipe']
       }).trim();
@@ -221,8 +313,8 @@ const getTodayCommits = (repoPath, author = null) => {
     
     const authorFilter = author ? `--author="${author}"` : '';
     const result = execSync(
-      `git log --since="${dateStr}" --all ${authorFilter} --format="%s"`,
-      { cwd: repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }
+      `git -C "${repoPath}" log --since="${dateStr}" --all ${authorFilter} --format="%s"`,
+      { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }
     );
     const commits = result.trim().split('\n').filter(msg => msg.length > 0);
     console.log(`  ${repoPath}: ${commits.length} commits hoy (${dateStr})`);
@@ -244,8 +336,8 @@ const getRecentCommits = (repoPath, days = 7, author = null) => {
     
     const authorFilter = author ? `--author="${author}"` : '';
     const result = execSync(
-      `git log --since="${dateStr}" --all ${authorFilter} --format="%s"`,
-      { cwd: repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }
+      `git -C "${repoPath}" log --since="${dateStr}" --all ${authorFilter} --format="%s"`,
+      { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }
     );
     const commits = result.trim().split('\n').filter(msg => msg.length > 0);
     console.log(`  ${repoPath}: ${commits.length} commits encontrados (${dateStr})`);
@@ -266,8 +358,8 @@ const getCommitsForDate = (repoPath, dateStr, author = null) => {
     
     const authorFilter = author ? `--author="${author}"` : '';
     const result = execSync(
-      `git log --since="${targetDate}" --until="${nextDateStr}" --all ${authorFilter} --format="%s"`,
-      { cwd: repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }
+      `git -C "${repoPath}" log --since="${targetDate}" --until="${nextDateStr}" --all ${authorFilter} --format="%s"`,
+      { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }
     );
     const commits = result.trim().split('\n').filter(msg => msg.length > 0);
     console.log(`  ${repoPath}: ${commits.length} commits (${targetDate})`);
@@ -287,8 +379,8 @@ const getRecentCommitsBeforeDate = (repoPath, dateStr, days = 5, author = null) 
     
     const authorFilter = author ? `--author="${author}"` : '';
     const result = execSync(
-      `git log --since="${pastDateStr}" --until="${targetDateStr}" --all ${authorFilter} --format="%s|%ad" --date=short`,
-      { cwd: repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }
+      `git -C "${repoPath}" log --since="${pastDateStr}" --until="${targetDateStr}" --all ${authorFilter} --format="%s|%ad" --date=short`,
+      { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }
     );
     const commits = result.trim().split('\n').filter(msg => msg.length > 0).map(line => {
       const [message, date] = line.split('|');
@@ -564,7 +656,18 @@ const generateFakeSummary = (commits) => {
   return generateStructuredSummary(categories);
 };
 
-const generateWithGemini = async (commits, context = 'same-day', targetDate = null) => {
+const smartTruncate = (text, maxLength) => {
+  if (text.length <= maxLength) return text;
+  const truncated = text.substring(0, maxLength);
+  const lastPeriod = truncated.lastIndexOf('.');
+  if (lastPeriod > maxLength * 0.6) {
+    return truncated.substring(0, lastPeriod + 1);
+  }
+  const lastSpace = truncated.lastIndexOf(' ');
+  return truncated.substring(0, lastSpace) + '.';
+};
+
+const generateWithGemini = async (commits, context = 'same-day', targetDate = null, extraContext = null) => {
   const apiKey = process.env.GEMINI_API_KEY;
   const model = process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite';
   
@@ -588,16 +691,23 @@ const generateWithGemini = async (commits, context = 'same-day', targetDate = nu
   }
   
   const dateInfo = targetDate ? `\nDía a registrar: ${targetDate}` : '';
+  const contextLabel = extraContext ? ' y el contexto adicional proporcionado' : '';
   
   const prompt = `Eres un asistente que ayuda a generar descripciones de actividades laborales para un sistema de registro de tiempo.
 
-Basándote en los siguientes commits de git, genera:
+Basándote en los siguientes commits de git${contextLabel}, genera:
 1. Un título corto (máximo 100 caracteres) que resuma la actividad
-2. Una descripción detallada (máximo 500 caracteres) que explique el trabajo realizado
+2. Una descripción detallada (1-2 oraciones completas, máximo 1000 caracteres) que explique el trabajo realizado
 ${dateInfo}
 Commits:
 ${commitsText}
+${extraContext ? `\nContexto adicional del usuario:\n"${extraContext}"` : ''}
 ${contextInstruction}
+
+REGLAS IMPORTANTES:
+- Completa TODAS las oraciones. NO termines con "..." ni dejes frases a medias.
+- La descripción debe ser un párrafo completo con sentido.
+- Si necesitas más espacio, prioriza completar la idea principal.
 
 Responde SOLO en formato JSON válido, sin texto adicional:
 {"title": "título corto aquí", "detail": "descripción detallada aquí"}`;
@@ -680,12 +790,8 @@ Responde SOLO en formato JSON válido, sin texto adicional:
       let title = result.title;
       let detail = result.detail;
       
-      if (title.length > 100) {
-        title = title.substring(0, 97) + '...';
-      }
-      if (detail.length > 500) {
-        detail = detail.substring(0, 497) + '...';
-      }
+      title = smartTruncate(title, 100);
+      detail = smartTruncate(detail, 1000);
       
       return { title, detail };
       
@@ -729,7 +835,7 @@ const saveHours = (startTime, endTime) => {
   }
 };
 
-const getBusinessDays = (startDate, endDate) => {
+const getBusinessDays = (startDate, endDate, holidays = []) => {
   const businessDays = [];
   const current = new Date(startDate);
   
@@ -739,7 +845,10 @@ const getBusinessDays = (startDate, endDate) => {
       const dd = String(current.getDate()).padStart(2, '0');
       const mm = String(current.getMonth() + 1).padStart(2, '0');
       const yyyy = current.getFullYear();
-      businessDays.push(`${dd}/${mm}/${yyyy}`);
+      const dateStr = `${dd}/${mm}/${yyyy}`;
+      if (!holidays.includes(dateStr)) {
+        businessDays.push(dateStr);
+      }
     }
     current.setDate(current.getDate() + 1);
   }
@@ -749,6 +858,58 @@ const getBusinessDays = (startDate, endDate) => {
 
 const getMissingRegistrations = (existingDates, businessDays) => {
   return businessDays.filter(day => !existingDates.includes(day));
+};
+
+const HOLIDAYS_FILE = path.join(__dirname, 'holidays.json');
+
+const loadHolidays = () => {
+  try {
+    if (fs.existsSync(HOLIDAYS_FILE)) {
+      const data = JSON.parse(fs.readFileSync(HOLIDAYS_FILE, 'utf-8'));
+      if (data.year && data.holidays) {
+        return { year: data.year, holidays: data.holidays };
+      }
+    }
+  } catch (err) {}
+  return { year: null, holidays: [] };
+};
+
+const saveHolidays = (year, holidays) => {
+  try {
+    fs.writeFileSync(HOLIDAYS_FILE, JSON.stringify({ year, holidays }, null, 2));
+  } catch (err) {
+    console.log('No se pudo guardar el archivo de festivos.');
+  }
+};
+
+const checkHolidaysYear = async () => {
+  const currentYear = new Date().getFullYear();
+  const { year, holidays } = loadHolidays();
+
+  if (year === currentYear && holidays.length > 0) {
+    return holidays;
+  }
+
+  console.log('\n====================================');
+  if (year && year !== currentYear) {
+    console.log(`Los festivos configurados son del año ${year}, pero estamos en ${currentYear}.`);
+  } else {
+    console.log('No hay festivos configurados.');
+  }
+  console.log('====================================\n');
+
+  const answer = await questionUserResponse(null, '¿Desea ingresar los festivos del año actual? (si/no): ');
+  if (answer === 'si') {
+    console.log('Ingrese los festivos en formato DD/MM/YYYY separados por coma:');
+    console.log('Ejemplo: 01/01/2026,12/01/2026,23/03/2026');
+    const input = await questionUserResponse(null, 'Festivos: ');
+    const newHolidays = input.split(',').map(h => h.trim()).filter(h => h.length > 0);
+    saveHolidays(currentYear, newHolidays);
+    console.log(`${newHolidays.length} festivos guardados.\n`);
+    return newHolidays;
+  }
+
+  return holidays;
 };
 
 const getCurrentUser = async (page, rl = null) => {
@@ -1019,7 +1180,7 @@ const inspectTableStructure = async (frameTree) => {
   }
 };
 
-const showMissingRegistrations = async (page, browser, company, usernameDaybeat, password) => {
+const showMissingRegistrations = async (page, browser, company, usernameDaybeat, password, holidays = []) => {
   console.log('====================================');
   console.log('CONSULTANDO DÍAS SIN REGISTRO');
   console.log('====================================');
@@ -1198,7 +1359,7 @@ const showMissingRegistrations = async (page, browser, company, usernameDaybeat,
   console.log(`\n\nTotal de registros encontrados: ${existingDates.length}`);
   console.log('[DEBUG] Fechas encontradas:', existingDates.sort().join(', '));
   
-  const businessDays = getBusinessDays(startDate, today);
+  const businessDays = getBusinessDays(startDate, today, holidays);
   
   console.log('[DEBUG] Total días hábiles en el rango:', businessDays.length);
   console.log('[DEBUG] Días hábiles:', businessDays.join(', '));
@@ -1222,7 +1383,7 @@ const showMissingRegistrations = async (page, browser, company, usernameDaybeat,
 };
 
 
-const registerBulkMissingDays = async (page, browser, company, usernameDaybeat, password) => {
+const registerBulkMissingDays = async (page, browser, company, usernameDaybeat, password, holidays = []) => {
   console.log('====================================');
   console.log('REGISTRO MASIVO DE DÍAS SIN REGISTRO');
   console.log('====================================');
@@ -1384,7 +1545,7 @@ const registerBulkMissingDays = async (page, browser, company, usernameDaybeat, 
     
     await frameTree.evaluate((href) => {
       window.location.href = href;
-    }, consultaUrl);
+    }, itemsUrl);
     await frameTree.waitForNavigation();
     await delay(1000);
   }
@@ -1393,7 +1554,7 @@ const registerBulkMissingDays = async (page, browser, company, usernameDaybeat, 
   console.log(`\n\nTotal de registros encontrados: ${existingDates.length}`);
   console.log('[DEBUG] Fechas encontradas:', existingDates.sort().join(', '));
   
-  const businessDays = getBusinessDays(startDate, today);
+  const businessDays = getBusinessDays(startDate, today, holidays);
   
   console.log('[DEBUG] Total días hábiles en el rango:', businessDays.length);
   console.log('[DEBUG] Días hábiles:', businessDays.join(', '));
@@ -1532,9 +1693,9 @@ const registerBulkMissingDays = async (page, browser, company, usernameDaybeat, 
   
   const selectedTransaction = optionsTransaction[transactionIndex];
   
-  const rootDir = process.env.ROOT_DIR;
+  const rootDir = resolveRootDir(process.env.ROOT_DIR);
   console.log('\nBuscando repositorios en:', rootDir);
-  const repos = findGitRepos(rootDir);
+  const repos = getReposWithCache(rootDir);
   console.log(`Repositorios encontrados: ${repos.length}`);
   
   const author = getGitAuthor(repos);
@@ -1812,10 +1973,10 @@ const registerNewTransaction = async (frameTree, page, autoData = null) => {
   let defaultDate = dd + mm + yyyy;
 
   if (mode === '1') {
-    const rootDir = process.env.ROOT_DIR;
+    const rootDir = resolveRootDir(process.env.ROOT_DIR);
     console.log('-------------------------');
     console.log('Buscando repositorios en:', rootDir);
-    const repos = findGitRepos(rootDir);
+    const repos = getReposWithCache(rootDir);
     console.log(`Repositorios encontrados: ${repos.length}`);
     
     const author = getGitAuthor(repos);
@@ -1871,10 +2032,10 @@ const registerNewTransaction = async (frameTree, page, autoData = null) => {
     }
   } else if (mode === '2') {
     // Modo Con IA (Gemini)
-    const rootDir = process.env.ROOT_DIR;
+    const rootDir = resolveRootDir(process.env.ROOT_DIR);
     console.log('-------------------------');
     console.log('Buscando repositorios en:', rootDir);
-    const repos = findGitRepos(rootDir);
+    const repos = getReposWithCache(rootDir);
     console.log(`Repositorios encontrados: ${repos.length}`);
     
     const author = getGitAuthor(repos);
@@ -1901,10 +2062,29 @@ const registerNewTransaction = async (frameTree, page, autoData = null) => {
     endTime = hours.end;
     formattedDate = defaultDate;
     
+    // Preguntar por contexto adicional (solo registro diario con IA)
+    let extraContext = null;
+    if (process.env.GEMINI_API_KEY && allCommits.length > 0) {
+      console.log('\nCommits encontrados:');
+      for (const commit of allCommits.slice(0, 10)) {
+        console.log(`  - ${commit.substring(0, 80)}`);
+      }
+      if (allCommits.length > 10) {
+        console.log(`  ... y ${allCommits.length - 10} más`);
+      }
+      
+      const wantContext = await questionUserResponse(frameTree, 
+        '\n¿Desea agregar contexto adicional para la IA? (si/no): ');
+      if (wantContext === 'si') {
+        extraContext = await questionUserResponse(frameTree, 
+          'Describa qué más hizo hoy (reuniones, debugging, diseño, etc.): ');
+      }
+    }
+    
     // Intentar generar con IA
     if (process.env.GEMINI_API_KEY && allCommits.length > 0) {
       console.log('  Generando con Gemini AI...');
-      const aiResult = await generateWithGemini(allCommits);
+      const aiResult = await generateWithGemini(allCommits, 'same-day', null, extraContext);
       
       if (aiResult) {
         title = aiResult.title;
@@ -1927,6 +2107,9 @@ const registerNewTransaction = async (frameTree, page, autoData = null) => {
     console.log('RESUMEN CON IA:');
     console.log(`Título: ${title}`);
     console.log(`Detalle: ${detail}`);
+    if (extraContext) {
+      console.log(`Contexto adicional: ${extraContext}`);
+    }
     console.log(`Fecha: ${dd}/${mm}/${yyyy}`);
     console.log(`Horario: ${startTime} - ${endTime}`);
     console.log('-------------------------');
@@ -1937,10 +2120,10 @@ const registerNewTransaction = async (frameTree, page, autoData = null) => {
       title = null;
     }
   } else if (mode === '3') {
-    const rootDir = process.env.ROOT_DIR;
+    const rootDir = resolveRootDir(process.env.ROOT_DIR);
     console.log('-------------------------');
     console.log('Buscando repositorios en:', rootDir);
-    const repos = findGitRepos(rootDir);
+    const repos = getReposWithCache(rootDir);
     console.log(`Repositorios encontrados: ${repos.length}`);
     
     const author = getGitAuthor(repos);
@@ -2066,39 +2249,67 @@ const delay = (time) => {
     return;
   }
 
+  const holidays = await checkHolidaysYear();
+
   await page.goto(linkDaybeat);
 
-  console.log('====================================');
-  console.log('¿QUÉ DESEA HACER?');
-  console.log('====================================');
-  console.log('1. Registrar actividad');
-  console.log('2. Ver días sin registro');
-  console.log('3. Registro masivo de días sin registro');
-  console.log('4. Salir');
-  console.log('====================================');
+  let keepRunning = true;
+  while (keepRunning) {
+    console.log('====================================');
+    console.log('¿QUÉ DESEA HACER?');
+    console.log('====================================');
+    console.log('1. Registrar actividad');
+    console.log('2. Ver días sin registro');
+    console.log('3. Registro masivo de días sin registro');
+    console.log('4. Re-escanear repositorios');
+    console.log('5. Salir');
+    console.log('====================================');
 
-  const mainOption = await new Promise((resolve) => {
-    rl.question('Seleccione opción (1/2/3/4): ', (answer) => {
-      resolve(answer);
+    const mainOption = await new Promise((resolve) => {
+      rl.question('Seleccione opción (1/2/3/4/5): ', (answer) => {
+        resolve(answer);
+      });
     });
-  });
 
-  if (mainOption === '4') {
-    console.log('Saliendo...');
-    rl.close();
-    browser.close();
-    return;
-  }
+    if (mainOption === '5') {
+      console.log('Saliendo...');
+      rl.close();
+      browser.close();
+      return;
+    }
 
-  if (mainOption === '2') {
-    await showMissingRegistrations(page, browser, company, usernameDaybeat, password);
-    return;
-  }
+    if (mainOption === '4') {
+      const rootDir = resolveRootDir(process.env.ROOT_DIR);
+      console.log('\nRe-escaneando repositorios...');
+      const repos = getReposWithCache(rootDir, true);
+      console.log(`Repositorios encontrados: ${repos.length}`);
+      for (const repo of repos) {
+        const display = repo.replace(rootDir, '.');
+        console.log(`  - ${display}`);
+      }
+      console.log('\nPresione Enter para continuar...');
+      await new Promise((resolve) => rl.question('', resolve));
+      continue;
+    }
 
-  if (mainOption === '3') {
-    await registerBulkMissingDays(page, browser, company, usernameDaybeat, password);
-    return;
-  }
+    if (mainOption === '2') {
+      await showMissingRegistrations(page, browser, company, usernameDaybeat, password, holidays);
+      keepRunning = false;
+      continue;
+    }
+
+    if (mainOption === '3') {
+      await registerBulkMissingDays(page, browser, company, usernameDaybeat, password, holidays);
+      keepRunning = false;
+      continue;
+    }
+
+    if (mainOption === '1') {
+      keepRunning = false;
+      break;
+    }
+
+  } // end while (keepRunning)
 
   page.on('dialog', async dialog => {
     console.log("-------------------------");

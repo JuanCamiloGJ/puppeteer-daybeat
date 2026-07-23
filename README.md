@@ -85,7 +85,11 @@ Registra automáticamente todos los días hábiles sin registro. El proceso:
    - Registra la transacción con el horario guardado en `.daybeat-history.json`.
 5. Muestra resumen final con días exitosos, días ya registrados y días con error.
 
-### 4. Salir
+### 4. Re-escanear repositorios
+
+Fuerza un re-escaneo completo de los repositorios git en `ROOT_DIR`. Actualiza el cache en `.daybeat-repos.json`. Muestra la lista de repositorios encontrados.
+
+### 5. Salir
 
 Cierra el script.
 
@@ -237,8 +241,24 @@ crontab -e
 | Archivo | Descripción |
 |---------|-------------|
 | `.daybeat-history.json` | Guarda el último horario usado (inicio/fin) para reutilizarlo en siguientes ejecuciones. Se crea automáticamente. |
-| `diagnostic-commits.js` | Script independiente para diagnosticar commits disponibles en los repositorios de `ROOT_DIR`. |
+| `.daybeat-repos.json` | Cache de repositorios git descubiertos (se actualiza automáticamente después de 7 días). Se puede forzar re-escaneo con `--rescan`. |
+| `holidays.json` | Festivos del año actual. Se crea automáticamente al primer inicio de año. Se puede editar manualmente o desde el prompt del script. |
+| `diagnostic-commits.js` | Script independiente para diagnosticar commits disponibles en los repositorios de `ROOT_DIR`. Soporta `--rescan` para forzar re-escaneo. |
 | `test-gemini.js` | Script independiente para probar la API de Gemini y verificar qué modelo funciona con tu API key. |
+
+## Comandos
+
+```bash
+# Ejecutar el script principal
+node index.js
+
+# Forzar re-escaneo de repositorios
+node index.js --rescan
+node diagnostic-commits.js --rescan
+
+# Diagnosticar commits disponibles
+node diagnostic-commits.js
+```
 
 ## Notas
 
