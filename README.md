@@ -242,6 +242,7 @@ crontab -e
 |---------|-------------|
 | `.daybeat-history.json` | Guarda el último horario usado (inicio/fin) para reutilizarlo en siguientes ejecuciones. Se crea automáticamente. |
 | `.daybeat-repos.json` | Cache de repositorios git descubiertos (se actualiza automáticamente después de 7 días). Se puede forzar re-escaneo con `--rescan`. |
+| `.daybeat-path.json` | Cache de la ruta de registro (sección, item, categoría, tipo de transacción). Se actualiza después de cada registro exitoso. |
 | `holidays.json` | Festivos del año actual. Se crea automáticamente al primer inicio de año. Se puede editar manualmente o desde el prompt del script. |
 | `diagnostic-commits.js` | Script independiente para diagnosticar commits disponibles en los repositorios de `ROOT_DIR`. Soporta `--rescan` para forzar re-escaneo. |
 | `test-gemini.js` | Script independiente para probar la API de Gemini y verificar qué modelo funciona con tu API key. |

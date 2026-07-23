@@ -79,83 +79,67 @@ const listElements = async (frame, selector) => {
   return links;
 }
 
+const normalizeText = (s) => s ? s.replace(/\s+/g, ' ').trim() : '';
+
 const whriteAndNavigateElementSelect = async (frame, selector, links) => {
-  // Pedir al usuario que elija una opción
-  return rl.question('Por favor, elige una opción (número): ', async (choice) => {
-    const index = parseInt(choice) - 1;
+  return new Promise((resolve) => {
+    rl.question('Por favor, elige una opción (número): ', async (choice) => {
+      const index = parseInt(choice) - 1;
 
-    if (index >= 0 && index < links.length) {
-      // Interactuar con la opción seleccionada
-      const selectedItem = links[index];
-      // Encontrar y hacer clic en el elemento seleccionado
-      const linkHandle = await frame.evaluateHandle((text, selector) => {
-        const elements = Array.from(document.querySelectorAll(selector));
-        return elements.find(el => el.textContent.trim() === text); // Comparación exacta
-      }, selectedItem.text, selector);  // Pasando `selectedItem.text` al contexto de `evaluateHandle`
+      if (index >= 0 && index < links.length) {
+        const selectedItem = links[index];
+        const linkHandle = await frame.evaluateHandle((text, selector) => {
+          const elements = Array.from(document.querySelectorAll(selector));
+          return elements.find(el => el.textContent.trim() === text);
+        }, selectedItem.text, selector);
 
-      if (linkHandle) {
-        await frame.evaluate(el => el.click(), linkHandle);
+        if (linkHandle) {
+          await frame.evaluate(el => el.click(), linkHandle);
+        }
+        resolve(selectedItem.text);
+      } else {
+        console.log('Opción inválida.');
+        resolve(null);
       }
-
-    } else {
-      console.log('Opción inválida.');
-    }
-
-    // Cerrar readline
-    // rl.close();
+    });
   });
 }
 
 const whriteAndNavigateOtherElementSelect = async (frame, selector, links) => {
-  // Pedir al usuario que elija una opción
-  return rl.question('Por favor, elige una opción (número): ', async (choice) => {
-    const index = parseInt(choice) - 1;
+  return new Promise((resolve) => {
+    rl.question('Por favor, elige una opción (número): ', async (choice) => {
+      const index = parseInt(choice) - 1;
 
-    if (index >= 0 && index < links.length) {
-      // Interactuar con la opción seleccionada
-      const selectedItem = links[index];
+      if (index >= 0 && index < links.length) {
+        const selectedItem = links[index];
 
-      // Encontrar y hacer clic en el elemento seleccionado
-      const linkHandle = await frame.evaluateHandle((text, selector) => {
-        const elements = Array.from(document.querySelectorAll(selector));
-        const elementSelect = elements.find(el => el.textContent.trim() === text); // Comparación exacta
+        const linkHandle = await frame.evaluateHandle((text, selector) => {
+          const elements = Array.from(document.querySelectorAll(selector));
+          const elementSelect = elements.find(el => el.textContent.trim() === text);
 
-        if (elementSelect) {
-          console.log("Primer <a> encontrado:", elementSelect.textContent);
-          // Subir al abuelo (tr) del primer <a>
-          const parentTd = elementSelect.parentElement;  // Subir al <td> padre
-          const grandParentTr = parentTd.parentElement; // Subir al <tr> abuelo
+          if (elementSelect) {
+            const parentTd = elementSelect.parentElement;
+            const grandParentTr = parentTd.parentElement;
+            const allLinksInRow = Array.from(grandParentTr.querySelectorAll('td > a'));
 
-          // Encontrar el último <a> en ese mismo <tr>
-          const allLinksInRow = Array.from(grandParentTr.querySelectorAll('td > a'));
-
-          // validar de que haya al menos dos enlaces para seleccionar el penúltimo
-          if (allLinksInRow.length >= 2) {
-            const penultimateLink = allLinksInRow[allLinksInRow.length - 2]; // Seleccionar el penúltimo <a>
-            return penultimateLink;
+            if (allLinksInRow.length >= 2) {
+              const penultimateLink = allLinksInRow[allLinksInRow.length - 2];
+              return penultimateLink;
+            }
           }
+
+          return null;
+        }, selectedItem.text, selector);
+
+        if (linkHandle) {
+          await linkHandle.click();
         }
-
-        return null;  // Si no se encontró el primer <a> o no hay suficientes enlaces
-
-      }, selectedItem.text, selector);  // Pasando `selectedItem.text` al contexto de `evaluateHandle`
-
-      console.log('Haciendo clic en la opción seleccionada...');
-
-      // Verifica si se encontró el penúltimo enlace para hacer clic
-      if (linkHandle) {
-        // console.log("Penúltimo <a> encontrado, haciendo clic...");
-        await linkHandle.click();
+        resolve(selectedItem.text);
       } else {
-        console.log("No se encontró el <a> correspondiente o no hay suficientes enlaces.");
+        console.log('Opción inválida.');
+        resolve(null);
       }
-
-    } else {
-      console.log('Opción inválida.');
-    }
-
-    // Cerrar readline
-    // rl.close();
+    });
   });
 }
 
@@ -832,6 +816,28 @@ const saveHours = (startTime, endTime) => {
     fs.writeFileSync(HISTORY_FILE, JSON.stringify({ startTime, endTime }, null, 2));
   } catch (err) {
     console.log('No se pudo guardar el horario.');
+  }
+};
+
+const PATH_CACHE_FILE = path.join(__dirname, '.daybeat-path.json');
+
+const loadPathCache = () => {
+  try {
+    if (fs.existsSync(PATH_CACHE_FILE)) {
+      const data = JSON.parse(fs.readFileSync(PATH_CACHE_FILE, 'utf-8'));
+      if (data.section?.text && data.item?.text && data.category?.value && data.transactionType?.value) {
+        return data;
+      }
+    }
+  } catch (err) {}
+  return null;
+};
+
+const savePathCache = (pathData) => {
+  try {
+    fs.writeFileSync(PATH_CACHE_FILE, JSON.stringify(pathData, null, 2));
+  } catch (err) {
+    console.log('No se pudo guardar la ruta de registro.');
   }
 };
 
@@ -1927,28 +1933,81 @@ const registerBulkMissingDays = async (page, browser, company, usernameDaybeat, 
 
 const listAndNavigateNewTransaction = async (frameTree, page) => {
   frameTree = page.frames().find(frame => frame.name() === 'tres');
-  // Esperar a que los links dentro del frame estén cargados
   const otherLinks = await listElements(frameTree, 'a');
-  // Pedir al usuario que elija una opción
-  await whriteAndNavigateOtherElementSelect(frameTree, 'a', otherLinks);
+  return await whriteAndNavigateOtherElementSelect(frameTree, 'a', otherLinks);
 }
 
-const registerNewTransaction = async (frameTree, page, autoData = null) => {
+const registerNewTransaction = async (frameTree, page, autoData = null, cachedCategory = null, cachedTransaction = null, sectionText = null, itemText = null) => {
   frameTree = page.frames().find(frame => frame.name() === 'tres');
-  // Esperar a que los select dentro del frame estén cargados
   await frameTree.waitForSelector('select');
 
-  // Listar todos las opciones de categoria.
+  // CATEGORÍA
   console.log('SELECCIONE LA CATEGORIA: ');
   const optionsCategory = await listElements(frameTree, 'select[name="id_categoria"]>option');
-  // Pedir al usuario que elija una opción
-  await selectOptionSelector(frameTree, 'select[name="id_categoria"]', optionsCategory);
+  let selectedCategoryValue = null;
+  let selectedCategoryText = null;
+  
+  if (cachedCategory?.value) {
+    const found = optionsCategory.find(o => o.value === cachedCategory.value);
+    if (found) {
+      console.log(`  Usando: ${cachedCategory.text}`);
+      selectedCategoryValue = cachedCategory.value;
+      selectedCategoryText = cachedCategory.text;
+      await frameTree.select('select[name="id_categoria"]', cachedCategory.value);
+      await delay(1500);
+    } else {
+      console.log('  Categoría anterior no existe. Seleccione manualmente.');
+      await selectOptionSelector(frameTree, 'select[name="id_categoria"]', optionsCategory);
+    }
+  } else {
+    await selectOptionSelector(frameTree, 'select[name="id_categoria"]', optionsCategory);
+  }
+  
+  // Capturar selección actual del dropdown
+  if (!selectedCategoryValue) {
+    const selectedIdx = await frameTree.$eval('select[name="id_categoria"]', el => el.selectedIndex);
+    selectedCategoryValue = optionsCategory[selectedIdx]?.value;
+    selectedCategoryText = optionsCategory[selectedIdx]?.text;
+  }
 
-  // Listar todos las opciones de transacción.
+  // TIPO DE TRANSACCIÓN
   console.log('SELECCIONE TIPO DE TRANSACCION: ');
   const optionsTransaction = await listElements(frameTree, 'select[name="cod_tipotransaccion"]>option');
-  // Pedir al usuario que elija una opción
-  await selectOptionSelector(frameTree, 'select[name="cod_tipotransaccion"]', optionsTransaction);
+  let selectedTransactionValue = null;
+  let selectedTransactionText = null;
+  
+  if (cachedTransaction?.value) {
+    const found = optionsTransaction.find(o => o.value === cachedTransaction.value);
+    if (found) {
+      console.log(`  Usando: ${cachedTransaction.text}`);
+      selectedTransactionValue = cachedTransaction.value;
+      selectedTransactionText = cachedTransaction.text;
+      await frameTree.select('select[name="cod_tipotransaccion"]', cachedTransaction.value);
+    } else {
+      console.log('  Transacción anterior no existe. Seleccione manualmente.');
+      await selectOptionSelector(frameTree, 'select[name="cod_tipotransaccion"]', optionsTransaction);
+    }
+  } else {
+    await selectOptionSelector(frameTree, 'select[name="cod_tipotransaccion"]', optionsTransaction);
+  }
+  
+  // Capturar selección actual del dropdown
+  if (!selectedTransactionValue) {
+    const selectedIdx = await frameTree.$eval('select[name="cod_tipotransaccion"]', el => el.selectedIndex);
+    selectedTransactionValue = optionsTransaction[selectedIdx]?.value;
+    selectedTransactionText = optionsTransaction[selectedIdx]?.text;
+  }
+
+  // Guardar ruta para próxima vez
+  if (sectionText && itemText && selectedCategoryValue && selectedTransactionValue) {
+    savePathCache({
+      section: { text: sectionText },
+      item: { text: itemText },
+      category: { value: selectedCategoryValue, text: selectedCategoryText },
+      transactionType: { value: selectedTransactionValue, text: selectedTransactionText }
+    });
+    console.log('\n✓ Ruta guardada para próxima vez');
+  }
 
   // Mostrar menú de modo de registro
   console.log('-------------------------');
@@ -2311,16 +2370,18 @@ const delay = (time) => {
 
   } // end while (keepRunning)
 
+  const cachedPath = loadPathCache();
+
   page.on('dialog', async dialog => {
     console.log("-------------------------");
     console.log('ALERTA ENCONTRADA:');
     console.log("-------------------------");
-    console.log(dialog.message()); // Muestra el mensaje de la alerta
+    console.log(dialog.message());
     if (dialog.message().trim() === 'Transacción ingresada éxitosamente') {
-      await dialog.accept(); // Aceptar (cerrar) la alerta
+      await dialog.accept();
       await finishOrContinue(page, browser);
     } else {
-      await dialog.accept(); // Aceptar (cerrar) la alerta
+      await dialog.accept();
       console.log('ERROR AL REGISTRAR, EJECUTE NUEVAMENTE.');
       rl.close();
       browser.close();
@@ -2442,26 +2503,85 @@ const delay = (time) => {
     /////////////////////////////////////////////////////////
     /**          SELECCIONAR SECCIÓN A REGISTRAR.         **/
     /////////////////////////////////////////////////////////
-    // Actualizar frame 3
     frameTree = page.frames().find(frame => frame.name() === 'tres');
-    // Esperar a que los links dentro del frame estén cargados
     const links = await listElements(frameTree, 'a');
-    // Pedir al usuario que elija una opción
-    await whriteAndNavigateElementSelect(frameTree, 'a', links);
+    
+    let useCachedPath = false;
+    let selectedSectionText = null;
+    let selectedItemText = null;
+    
+    if (cachedPath?.section?.text && cachedPath?.item?.text && cachedPath?.category?.value && cachedPath?.transactionType?.value) {
+      const sectionExists = links.some(l => normalizeText(l.text) === normalizeText(cachedPath.section.text));
+      if (sectionExists) {
+        console.log(`\nRuta anterior: ${cachedPath.section.text} > ${cachedPath.item.text} > ${cachedPath.category.text} > ${cachedPath.transactionType.text}`);
+        const answer = await questionUserResponse(frameTree, '\n¿Usar la misma ruta? (si/no): ');
+        if (answer === 'si') {
+          useCachedPath = true;
+          selectedSectionText = cachedPath.section.text;
+          selectedItemText = cachedPath.item.text;
+        }
+      } else {
+        console.log('\nLa sección anterior ya no existe. Seleccione manualmente.');
+      }
+    }
+    
+    if (useCachedPath) {
+      // Seleccionar sección automáticamente
+      const foundIdx = links.findIndex(l => l.text === cachedPath.section.text);
+      const selectedLink = links[foundIdx];
+      const linkHandle = await frameTree.evaluateHandle((text, selector) => {
+        const elements = Array.from(document.querySelectorAll(selector));
+        return elements.find(el => el.textContent.trim() === text);
+      }, selectedLink.text, 'a');
+      if (linkHandle) await frameTree.evaluate(el => el.click(), linkHandle);
+    } else {
+      // Selección manual de sección
+      selectedSectionText = await whriteAndNavigateElementSelect(frameTree, 'a', links);
+    }
     ////////////////////////--END--/////////////////////////
 
     /////////////////////////////////////////////////////////
     /**  LISTAR Y NAVEGAR A REGISTRAR NUEVA TRANSACCIÓN.  **/
     /////////////////////////////////////////////////////////
     await frameTree.waitForNavigation();
-    await listAndNavigateNewTransaction(frameTree, page);
+    
+    if (useCachedPath) {
+      // Navegar al item automáticamente
+      frameTree = page.frames().find(frame => frame.name() === 'tres');
+      const otherLinks = await listElements(frameTree, 'a');
+      const itemIdx = otherLinks.findIndex(l => normalizeText(l.text) === normalizeText(cachedPath.item.text));
+      if (itemIdx >= 0) {
+        const selectedItem = otherLinks[itemIdx];
+        const itemHandle = await frameTree.evaluateHandle((text, selector) => {
+          const elements = Array.from(document.querySelectorAll(selector));
+          const elementSelect = elements.find(el => el.textContent.trim() === text);
+          if (elementSelect) {
+            const parentTd = elementSelect.parentElement;
+            const grandParentTr = parentTd.parentElement;
+            const allLinksInRow = Array.from(grandParentTr.querySelectorAll('td > a'));
+            if (allLinksInRow.length >= 2) {
+              return allLinksInRow[allLinksInRow.length - 2];
+            }
+          }
+          return null;
+        }, selectedItem.text, 'a');
+        if (itemHandle) await itemHandle.click();
+        await frameTree.waitForNavigation();
+      }
+    } else {
+      selectedItemText = await listAndNavigateNewTransaction(frameTree, page);
+    }
     ////////////////////////--END--/////////////////////////
 
     /////////////////////////////////////////////////////////
     /**     DILIGENCIAR FORMULARIO PARA NUEVO REGISTRO.   **/
     /////////////////////////////////////////////////////////
     await frameTree.waitForNavigation();
-    registerNewTransaction(frameTree, page);
+    registerNewTransaction(frameTree, page, null, 
+      useCachedPath ? cachedPath.category : null, 
+      useCachedPath ? cachedPath.transactionType : null,
+      selectedSectionText,
+      selectedItemText);
 
   } else {
     console.log('Frame no encontrado');

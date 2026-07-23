@@ -113,6 +113,7 @@ When `GEMINI_API_KEY` is configured, the script can use Google Gemini AI to gene
 
 - `.daybeat-history.json`: stores the last-used start/end times for fake mode.
 - `.daybeat-repos.json`: caches discovered git repositories (auto-refresh after 7 days). Supports `--rescan` flag to force refresh. Added to `.gitignore`.
+- `.daybeat-path.json`: caches the daily registration path (section, item, category, transaction type). Auto-updates after each successful registration. Prompts user to reuse cached path on next registration. Added to `.gitignore`.
 - `holidays.json`: stores holidays for the current year (format: `{ "year": 2026, "holidays": ["DD/MM/YYYY", ...] }`). Auto-prompts for update when year changes. Shared between users (not in `.gitignore`).
 
 ## Main menu
