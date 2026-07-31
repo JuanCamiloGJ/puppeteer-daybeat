@@ -2353,14 +2353,12 @@ const delay = (time) => {
 
     if (mainOption === '2') {
       await showMissingRegistrations(page, browser, company, usernameDaybeat, password, holidays);
-      keepRunning = false;
-      continue;
+      return;
     }
 
     if (mainOption === '3') {
       await registerBulkMissingDays(page, browser, company, usernameDaybeat, password, holidays);
-      keepRunning = false;
-      continue;
+      return;
     }
 
     if (mainOption === '1') {
