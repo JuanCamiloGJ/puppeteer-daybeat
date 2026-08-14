@@ -3,6 +3,12 @@ const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
 
+// Git para Windows rechaza repositorios WSL/UNC por "dubious ownership"
+// (archivos con otro dueño). Este flag desactiva esa protección por comando.
+// OJO: usar comillas dobles — cmd.exe (Windows) no interpreta las simples y
+// git recibiría ''*'' literal, lo que NO matchea ninguna excepción.
+const GIT_SAFE_DIR = '-c "safe.directory=*"';
+
 const SKIP_DIRS = [
   'node_modules', '.git', '.idea', '.vscode', '__pycache__', 'vendor',
   '.svn', 'bower_components', 'dist', 'build', '.next', '.nuxt',
@@ -67,8 +73,10 @@ const saveRepoCache = (repos, rootDir) => {
 const getReposWithCache = (rootDir, forceRescan = false) => {
   if (!forceRescan) {
     const cached = loadRepoCache();
-    if (cached && cached.rootDir === rootDir) {
-      const valid = cached.repos.filter(r => fs.existsSync(r));
+    if (cached && toLinuxPath(cached.rootDir) === toLinuxPath(rootDir)) {
+      const valid = cached.repos
+        .map(repo => resolveRootDir(repo))
+        .filter(r => fs.existsSync(r));
       if (valid.length > 0) {
         console.log(`Usando repositorios cacheados (${valid.length})`);
         return valid;
@@ -87,6 +95,8 @@ const resolveRootDir = (dir) => {
   const isWindows = process.platform === 'win32';
 
   if (isWindows && dir.startsWith('/')) {
+    if (dir.startsWith('//')) return dir;
+
     try {
       const output = execSync('wsl -l -q', { encoding: 'utf-16le', stdio: ['pipe', 'pipe', 'pipe'] });
       const distros = output.split('\n').map(d => d.replace(/\0/g, '').trim()).filter(Boolean);
@@ -123,6 +133,17 @@ const resolveRootDir = (dir) => {
   return dir;
 };
 
+// Normaliza rutas UNC/Windows a su forma Linux para comparaciones
+const toLinuxPath = (p) => {
+  if (p.startsWith('//wsl.localhost')) {
+    return '/' + p.split('/').filter(Boolean).slice(2).join('/');
+  }
+  if (p.startsWith('\\\\wsl.localhost')) {
+    return '/' + p.split('\\').filter(Boolean).slice(2).join('/');
+  }
+  return p;
+};
+
 const getGitAuthor = (repos) => {
   if (process.env.GIT_AUTHOR_EMAIL) {
     return process.env.GIT_AUTHOR_EMAIL;
@@ -130,7 +151,7 @@ const getGitAuthor = (repos) => {
 
   for (const repo of repos) {
     try {
-      const email = execSync(`git -C "${repo}" config user.email`, {
+      const email = execSync(`git ${GIT_SAFE_DIR} -C "${repo}" config user.email`, {
         encoding: 'utf-8',
         stdio: ['pipe', 'pipe', 'pipe']
       }).trim();
@@ -150,11 +171,11 @@ const getCommitsLast30Days = (repoPath, author = null) => {
     const year = pastDate.getFullYear();
     const month = String(pastDate.getMonth() + 1).padStart(2, '0');
     const day = String(pastDate.getDate()).padStart(2, '0');
-    const dateStr = `${year}-${month}-${day}`;
+    const dateStr = `${year}-${month}-${day} 00:00:00`;
 
     const authorFilter = author ? `--author="${author}"` : '';
     const result = execSync(
-      `git -C "${repoPath}" log --since="${dateStr}" --all ${authorFilter} --format="%H|%ai|%s"`,
+      `git ${GIT_SAFE_DIR} -C "${repoPath}" log --since="${dateStr}" --all ${authorFilter} --format="%H|%ai|%s"`,
       { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 30000 }
     );
     const lines = result.trim().split('\n').filter(msg => msg.length > 0);

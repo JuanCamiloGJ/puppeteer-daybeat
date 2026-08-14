@@ -3,3 +3,4 @@ node_modules/
 .daybeat-history.json
 .daybeat-repos.json
 .daybeat-path.json
+.daybeat-jira-tokens.json

@@ -4,6 +4,13 @@ const readline = require('readline');
 const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
+const { isConfigured, getDailyActivity, formatActivityForReport, closeConnection } = require('./lib/jira-report.js');
+
+// Git para Windows rechaza repositorios WSL/UNC por "dubious ownership"
+// (archivos con otro dueño). Este flag desactiva esa protección por comando.
+// OJO: usar comillas dobles — cmd.exe (Windows) no interpreta las simples y
+// git recibiría ''*'' literal, lo que NO matchea ninguna excepción.
+const GIT_SAFE_DIR = '-c "safe.directory=*"';
 
 
 // Configurar readline para leer la entrada del usuario
@@ -12,6 +19,15 @@ const rl = readline.createInterface({
   output: process.stdout
 });
 
+// @inquirer/checkbox toma control de stdin y al terminar lo deja PAUSADO:
+// sin resume() el stream no emite 'data' y rl.question queda colgado.
+// No recrear el readline: el listener 'data' del interface existente sigue
+// registrado y recrearlo reactiva raw mode innecesariamente.
+const restoreReadline = () => {
+  try { process.stdin.setRawMode(false); } catch (err) { /* no TTY */ }
+  process.stdin.resume();
+};
+
 // Resolución de rutas WSL/Windows
 const resolveRootDir = (dir) => {
   if (!dir) return dir;
@@ -19,6 +35,8 @@ const resolveRootDir = (dir) => {
   const isWindows = process.platform === 'win32';
 
   if (isWindows && dir.startsWith('/')) {
+    if (dir.startsWith('//')) return dir;
+
     try {
       const output = execSync('wsl -l -q', { encoding: 'utf-16le', stdio: ['pipe', 'pipe', 'pipe'] });
       const distros = output.split('\n').map(d => d.replace(/\0/g, '').trim()).filter(Boolean);
@@ -53,6 +71,17 @@ const resolveRootDir = (dir) => {
   }
 
   return dir;
+};
+
+// Normaliza rutas UNC/Windows a su forma Linux para comparaciones
+const toLinuxPath = (p) => {
+  if (p.startsWith('//wsl.localhost')) {
+    return '/' + p.split('/').filter(Boolean).slice(2).join('/');
+  }
+  if (p.startsWith('\\\\wsl.localhost')) {
+    return '/' + p.split('\\').filter(Boolean).slice(2).join('/');
+  }
+  return p;
 };
 
 // Funciones auxiliares.
@@ -187,6 +216,67 @@ const questionUserResponse = async (frame, question) => {
   });
 }
 
+// Selección múltiple interactiva de la actividad de Jira (@inquirer/checkbox):
+// espacio marca/desmarca, "a" selecciona todos, enter confirma.
+// La primera opción "Seleccionar todos" marca todo de una; si no, solo los
+// marcados entran al contexto del reporte.
+const ALL_JIRA = '__ALL__';
+
+const selectJiraActivityMulti = async (activity) => {
+  const { default: checkbox, Separator } = await import('@inquirer/checkbox');
+  const choices = [{ name: 'Seleccionar todos', value: ALL_JIRA }];
+
+  if (activity.issues.length > 0) {
+    choices.push(new Separator('-- Incidencias --'));
+    activity.issues.slice(0, 15).forEach((issue, i) => {
+      const status = issue.status ? ` (${issue.status})` : '';
+      choices.push({
+        name: `${issue.key}: ${issue.summary || 'Sin resumen'}${status}`,
+        value: { kind: 'issue', i }
+      });
+    });
+  }
+  if (activity.comments.length > 0) {
+    choices.push(new Separator('-- Comentarios --'));
+    activity.comments.slice(0, 15).forEach((comment, i) => {
+      const time = comment.created ? ` (${comment.created.substring(0, 16).replace('T', ' ')})` : '';
+      choices.push({
+        name: `${comment.issueKey}: "${comment.body}"${time}`,
+        value: { kind: 'comment', i }
+      });
+    });
+  }
+  if (activity.worklogs.length > 0) {
+    choices.push(new Separator('-- Worklogs --'));
+    activity.worklogs.slice(0, 15).forEach((worklog, i) => {
+      choices.push({
+        name: `${worklog.issueKey}: ${worklog.timeSpent}${worklog.comment ? ` — "${worklog.comment}"` : ''}`,
+        value: { kind: 'worklog', i }
+      });
+    });
+  }
+
+  const answer = await checkbox({
+    message: 'Seleccione la actividad de Jira a incluir (espacio: marcar, a: todos, enter: confirmar):',
+    pageSize: 12,
+    choices
+  });
+
+  if (answer.includes(ALL_JIRA)) {
+    restoreReadline();
+    return activity;
+  }
+
+  const filtered = { ...activity, issues: [], comments: [], worklogs: [] };
+  for (const sel of answer) {
+    if (sel.kind === 'issue') filtered.issues.push(activity.issues[sel.i]);
+    else if (sel.kind === 'comment') filtered.comments.push(activity.comments[sel.i]);
+    else filtered.worklogs.push(activity.worklogs[sel.i]);
+  }
+  restoreReadline();
+  return filtered;
+}
+
 // Funciones de automatización basadas en commits
 
 const SKIP_DIRS = [
@@ -253,8 +343,10 @@ const saveRepoCache = (repos, rootDir) => {
 const getReposWithCache = (rootDir, forceRescan = false) => {
   if (!forceRescan) {
     const cached = loadRepoCache();
-    if (cached && cached.rootDir === rootDir) {
-      const valid = cached.repos.filter(r => fs.existsSync(r));
+    if (cached && toLinuxPath(cached.rootDir) === toLinuxPath(rootDir)) {
+      const valid = cached.repos
+        .map(repo => resolveRootDir(repo))
+        .filter(r => fs.existsSync(r));
       if (valid.length > 0) {
         console.log(`Usando repositorios cacheados (${valid.length})`);
         return valid;
@@ -274,7 +366,7 @@ const getGitAuthor = (repos) => {
   
   for (const repo of repos) {
     try {
-      const email = execSync(`git -C "${repo}" config user.email`, {
+      const email = execSync(`git ${GIT_SAFE_DIR} -C "${repo}" config user.email`, {
         encoding: 'utf-8',
         stdio: ['pipe', 'pipe', 'pipe']
       }).trim();
@@ -297,7 +389,7 @@ const getTodayCommits = (repoPath, author = null) => {
     
     const authorFilter = author ? `--author="${author}"` : '';
     const result = execSync(
-      `git -C "${repoPath}" log --since="${dateStr}" --all ${authorFilter} --format="%s"`,
+      `git ${GIT_SAFE_DIR} -C "${repoPath}" log --since="${dateStr}" --all ${authorFilter} --format="%s"`,
       { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }
     );
     const commits = result.trim().split('\n').filter(msg => msg.length > 0);
@@ -316,11 +408,11 @@ const getRecentCommits = (repoPath, days = 7, author = null) => {
     const year = pastDate.getFullYear();
     const month = String(pastDate.getMonth() + 1).padStart(2, '0');
     const day = String(pastDate.getDate()).padStart(2, '0');
-    const dateStr = `${year}-${month}-${day}`;
+    const dateStr = `${year}-${month}-${day} 00:00:00`;
     
     const authorFilter = author ? `--author="${author}"` : '';
     const result = execSync(
-      `git -C "${repoPath}" log --since="${dateStr}" --all ${authorFilter} --format="%s"`,
+      `git ${GIT_SAFE_DIR} -C "${repoPath}" log --since="${dateStr}" --all ${authorFilter} --format="%s"`,
       { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }
     );
     const commits = result.trim().split('\n').filter(msg => msg.length > 0);
@@ -336,13 +428,14 @@ const getCommitsForDate = (repoPath, dateStr, author = null) => {
   try {
     const [day, month, year] = dateStr.split('/');
     const targetDate = `${year}-${month}-${day}`;
-    const nextDate = new Date(`${year}-${month}-${day}`);
+    // Hora LOCAL (new Date('YYYY-MM-DD') parsea UTC y rompe el +1 día en UTC-x)
+    const nextDate = new Date(year, month - 1, day);
     nextDate.setDate(nextDate.getDate() + 1);
     const nextDateStr = `${nextDate.getFullYear()}-${String(nextDate.getMonth() + 1).padStart(2, '0')}-${String(nextDate.getDate()).padStart(2, '0')}`;
     
     const authorFilter = author ? `--author="${author}"` : '';
     const result = execSync(
-      `git -C "${repoPath}" log --since="${targetDate}" --until="${nextDateStr}" --all ${authorFilter} --format="%s"`,
+      `git ${GIT_SAFE_DIR} -C "${repoPath}" log --since="${targetDate} 00:00:00" --until="${nextDateStr} 00:00:00" --all ${authorFilter} --format="%s"`,
       { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }
     );
     const commits = result.trim().split('\n').filter(msg => msg.length > 0);
@@ -353,17 +446,143 @@ const getCommitsForDate = (repoPath, dateStr, author = null) => {
   }
 };
 
+// Commits de una fecha específica CON la hora del commit (formato HH:MM local).
+// Se usa solo para armar los bloques del día (registro multi-bloque).
+const getCommitsWithTime = (repoPath, dateStr, author = null) => {
+  try {
+    const [day, month, year] = dateStr.split('/');
+    const targetDate = `${year}-${month}-${day}`;
+    // Construir en hora LOCAL (new Date('YYYY-MM-DD') parsea en UTC y en
+    // zonas UTC-x el setDate(+1) cae en el mismo día calendario).
+    const nextDate = new Date(year, month - 1, day);
+    nextDate.setDate(nextDate.getDate() + 1);
+    const nextDateStr = `${nextDate.getFullYear()}-${String(nextDate.getMonth() + 1).padStart(2, '0')}-${String(nextDate.getDate()).padStart(2, '0')}`;
+
+    const authorFilter = author ? `--author="${author}"` : '';
+    const result = execSync(
+      `git ${GIT_SAFE_DIR} -C "${repoPath}" log --since="${targetDate} 00:00:00" --until="${nextDateStr} 00:00:00" --all ${authorFilter} --format="%s|%ai"`,
+      { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }
+    );
+    return result.trim().split('\n').filter(line => line.length > 0).map(line => {
+      const [message, iso] = line.split('|');
+      const time = iso ? iso.substring(11, 16) : null; // HH:MM (hora local del autor)
+      return { message, time };
+    }).filter(c => c.time);
+  } catch (err) {
+    return [];
+  }
+};
+
+// ---------------------------------------------------------------------------
+// Registro por bloques: reparte el día en varios bloques según la actividad
+// ---------------------------------------------------------------------------
+
+const toMinutes = (hhmm) => {
+  const h = parseInt(hhmm.substring(0, 2), 10);
+  const m = parseInt(hhmm.substring(2, 4), 10);
+  return h * 60 + m;
+};
+
+const toHHMM = (minutes) => {
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  return `${String(h).padStart(2, '0')}${String(m).padStart(2, '0')}`;
+};
+
+// Convierte un ISO (UTC de Jira) a HH:MM local, para anclar comentarios/worklogs
+const isoToLocalHHMM = (iso) => {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return null;
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+};
+
+// "2h 30m" / "30m" / "2h" -> horas (float)
+const parseTimeSpentHours = (timeSpent) => {
+  if (!timeSpent) return 1;
+  const h = /(\d+)h/.exec(timeSpent);
+  const m = /(\d+)m/.exec(timeSpent);
+  const hours = h ? parseInt(h[1], 10) : 0;
+  const minutes = m ? parseInt(m[1], 10) : 0;
+  return Math.max(0.5, hours + minutes / 60);
+};
+
+// Construye los bloques del día a partir de eventos con hora (commits,
+// comentarios, worklogs). Los eventos con separación < GAP_MINUTES forman un
+// mismo bloque; la duración se reparte proporcional a la actividad de cada
+// cluster (mínimo 30min, máximo 4 bloques) y el último absorbe el resto para
+// que el total sea EXACTO (nunca quedan horas incompletas).
+const buildDayBlocks = (events, startTime, endTime) => {
+  const GAP_MINUTES = 60;
+  const MAX_BLOCKS = 4;
+  const MIN_BLOCK = 30;
+
+  if (!events || events.length < 2) return null;
+
+  const sorted = [...events].sort((a, b) => a.minutes - b.minutes);
+  const clusters = [];
+  for (const ev of sorted) {
+    const last = clusters[clusters.length - 1];
+    if (last && ev.minutes - last.lastMinute <= GAP_MINUTES) {
+      last.events.push(ev);
+      last.lastMinute = ev.minutes;
+      last.weight += ev.weight;
+    } else {
+      clusters.push({ events: [ev], firstMinute: ev.minutes, lastMinute: ev.minutes, weight: ev.weight });
+    }
+  }
+  if (clusters.length < 2) return null;
+
+  // Si hay más de MAX_BLOCKS clusters, fusionar los pares adyacentes menores
+  while (clusters.length > MAX_BLOCKS) {
+    let best = 1;
+    let bestWeight = Infinity;
+    for (let i = 1; i < clusters.length; i++) {
+      const w = clusters[i - 1].weight + clusters[i].weight;
+      if (w < bestWeight) {
+        bestWeight = w;
+        best = i;
+      }
+    }
+    clusters[best - 1].events.push(...clusters[best].events);
+    clusters[best - 1].weight += clusters[best].weight;
+    clusters[best - 1].lastMinute = clusters[best].lastMinute;
+    clusters.splice(best, 1);
+  }
+
+  const totalWeight = clusters.reduce((sum, c) => sum + c.weight, 0);
+  const totalMinutes = toMinutes(endTime) - toMinutes(startTime);
+  let cursor = toMinutes(startTime);
+  const blocks = [];
+
+  for (let i = 0; i < clusters.length; i++) {
+    const isLast = i === clusters.length - 1;
+    let duration;
+    if (isLast) {
+      duration = toMinutes(endTime) - cursor; // absorbe el resto: suma exacta
+    } else {
+      const share = Math.round((clusters[i].weight / totalWeight) * totalMinutes / MIN_BLOCK) * MIN_BLOCK;
+      const reserve = MIN_BLOCK * (clusters.length - i - 1);
+      duration = Math.max(MIN_BLOCK, Math.min(share, toMinutes(endTime) - cursor - reserve));
+    }
+    blocks.push({ start: toHHMM(cursor), end: toHHMM(cursor + duration), events: clusters[i].events });
+    cursor += duration;
+  }
+
+  return blocks;
+};
+
 const getRecentCommitsBeforeDate = (repoPath, dateStr, days = 5, author = null) => {
   try {
     const [day, month, year] = dateStr.split('/');
-    const targetDate = new Date(`${year}-${month}-${day}`);
+    // Hora LOCAL (new Date('YYYY-MM-DD') parsea UTC y rompe el cálculo en UTC-x)
+    const targetDate = new Date(year, month - 1, day);
     const pastDate = new Date(targetDate.getTime() - (days * 24 * 60 * 60 * 1000));
     const pastDateStr = `${pastDate.getFullYear()}-${String(pastDate.getMonth() + 1).padStart(2, '0')}-${String(pastDate.getDate()).padStart(2, '0')}`;
     const targetDateStr = `${year}-${month}-${day}`;
     
     const authorFilter = author ? `--author="${author}"` : '';
     const result = execSync(
-      `git -C "${repoPath}" log --since="${pastDateStr}" --until="${targetDateStr}" --all ${authorFilter} --format="%s|%ad" --date=short`,
+      `git ${GIT_SAFE_DIR} -C "${repoPath}" log --since="${pastDateStr} 00:00:00" --until="${targetDateStr} 00:00:00" --all ${authorFilter} --format="%s|%ad" --date=short`,
       { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }
     );
     const commits = result.trim().split('\n').filter(msg => msg.length > 0).map(line => {
@@ -1152,6 +1371,187 @@ const extractRegistrations = async (frameTree, startDate = null, currentUser = n
   }
 };
 
+// Parsea la tabla de transacciones de la página de detalle del item
+// (itemsint_actualizar.asp). Devuelve [{ start, end, desc, id2, updateHref }]
+// para la fecha objetivo (targetDate en formato YYYY-MM-DD): la columna
+// "Fecha Transacción" expone la hora FINAL y "Tiempo" los minutos ->
+// inicio = fin - duración. id2 y updateHref provienen del link de
+// actualización de cada fila (transaccionesint_actualizar.asp...upd_trans=1).
+const parseTransactionTable = async (frameTree, targetDate, currentUser = null) => {
+  const rows = await frameTree.evaluate((targetDate, currentUser) => {
+    const ranges = [];
+    const tables = document.querySelectorAll('table');
+    for (const table of tables) {
+      const headerRow = table.querySelector('tr');
+      if (!headerRow) continue;
+      const headers = Array.from(headerRow.querySelectorAll('td, th')).map(h => h.textContent.trim());
+      const fechaIndex = headers.findIndex(h => h.includes('Fecha Transacción'));
+      const usuarioIndex = headers.findIndex(h => h.includes('Usuario Transacción'));
+      const tiempoIndex = headers.findIndex(h => h.includes('Tiempo'));
+      const descIndex = headers.findIndex(h => h.includes('Descripción'));
+      if (fechaIndex === -1) continue;
+
+      const trs = table.querySelectorAll('tr');
+      for (let i = 1; i < trs.length; i++) {
+        const cells = trs[i].querySelectorAll('td');
+        if (cells.length <= fechaIndex) continue;
+        if (currentUser && usuarioIndex !== -1 && cells.length > usuarioIndex) {
+          const usuarioText = cells[usuarioIndex].textContent.trim();
+          if (usuarioText !== currentUser) continue;
+        }
+        const fechaText = cells[fechaIndex].textContent.trim();
+        const match = fechaText.match(/(\d{4})-(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{2})/);
+        if (!match) continue;
+        const fechaDate = `${match[1]}-${String(match[2]).padStart(2, '0')}-${String(match[3]).padStart(2, '0')}`;
+        if (fechaDate !== targetDate) continue;
+
+        const endMin = parseInt(match[4], 10) * 60 + parseInt(match[5], 10);
+        let durationMin = 0;
+        if (tiempoIndex !== -1 && cells.length > tiempoIndex) {
+          const tMatch = cells[tiempoIndex].textContent.trim().match(/(\d+)\s*min/);
+          if (tMatch) durationMin = parseInt(tMatch[1], 10);
+        }
+        const startMin = endMin - durationMin;
+        const start = `${String(Math.floor(startMin / 60)).padStart(2, '0')}${String(startMin % 60).padStart(2, '0')}`;
+        const end = `${String(Math.floor(endMin / 60)).padStart(2, '0')}${String(endMin % 60).padStart(2, '0')}`;
+        const desc = (descIndex !== -1 && cells.length > descIndex)
+          ? cells[descIndex].textContent.trim().substring(0, 60)
+          : '';
+
+        // id2 (id de la transacción) y href del link de actualización (UPD)
+        let id2 = null;
+        let updateHref = null;
+        for (const link of trs[i].querySelectorAll('a')) {
+          const href = link.href || '';
+          const id2Match = href.match(/transaccionesint_actualizar\.asp[^'"]*id2=(\d+)/);
+          if (id2Match) {
+            id2 = id2Match[1];
+            if (!updateHref || href.includes('upd_trans=1')) updateHref = href;
+          }
+        }
+        ranges.push({ start, end, desc, id2, updateHref });
+      }
+    }
+    return ranges;
+  }, targetDate, currentUser);
+  return rows;
+};
+
+// Lee los rangos horarios ya registrados por el usuario en el item para una
+// fecha dada. Navega al detalle del item (itemsint_actualizar.asp) desde el
+// formulario de creación (mismos query params, cambia solo el script), lee la
+// tabla de transacciones (página 1; la de la fecha objetivo es la primera fila
+// por orden descendente) y deduce el rango: la columna "Fecha Transacción"
+// expone la hora FINAL y "Tiempo" los minutos -> inicio = fin - duración.
+// Devuelve { ranges: [{start, end, desc}], count } o null si no pudo leer
+// (fail-open: no bloquea el registro).
+const getExistingRanges = async (frameTree, page, dateStr, currentUser = null, catValue = null, transValue = null) => {
+  try {
+    const formUrl = await frameTree.evaluate(() => window.location.href);
+    const detailUrl = formUrl.replace('transaccionesint_crear.asp', 'itemsint_actualizar.asp');
+    if (detailUrl === formUrl) return null; // no es el formulario de creación
+
+    await frameTree.evaluate((href) => { window.location.href = href; }, detailUrl);
+    await frameTree.waitForNavigation();
+    await delay(1200);
+    frameTree = page.frames().find(frame => frame.name() === 'tres');
+    if (!frameTree) return null;
+
+    const [dd, mm, yyyy] = dateStr.split('/');
+    const targetDate = `${yyyy}-${mm}-${dd}`;
+
+    const rows = await parseTransactionTable(frameTree, targetDate, currentUser);
+
+    // Volver al formulario de creación
+    await frameTree.evaluate((href) => { window.location.href = href; }, formUrl);
+    await frameTree.waitForNavigation();
+    await delay(1500);
+    frameTree = page.frames().find(frame => frame.name() === 'tres');
+    if (!frameTree) return null;
+    await frameTree.waitForSelector('select');
+
+    // La recarga resetea los selects obligatorios: re-seleccionar
+    if (catValue) {
+      await frameTree.select('select[name="id_categoria"]', catValue);
+      await delay(1500);
+    }
+    if (transValue) {
+      await frameTree.select('select[name="cod_tipotransaccion"]', transValue);
+    }
+
+    return { ranges: rows, count: rows.length };
+  } catch (err) {
+    console.log('  ✗ Error leyendo registros existentes:', err.message);
+    return null;
+  }
+};
+
+// Intersecta los bloques propuestos con los horarios libres de la jornada
+// (jornada [startTime, endTime] menos los rangos ocupados). Un bloque puede
+// partirse en varias piezas; las piezas < MIN_BLOCK se descartan. Los eventos
+// del bloque original se reparten a sus piezas en orden. Devuelve los bloques
+// ajustados o null si no queda ninguna pieza.
+const intersectBlocksWithFree = (blocks, occupiedRanges, startTime, endTime) => {
+  const MIN_BLOCK = 30;
+  if (!blocks || blocks.length === 0) return null;
+  if (!occupiedRanges || occupiedRanges.length === 0) return blocks;
+
+  const sorted = [...occupiedRanges]
+    .map(r => ({ start: toMinutes(r.start), end: toMinutes(r.end) }))
+    .sort((a, b) => a.start - b.start);
+
+  // Construir huecos libres: [jornadaStart, jornadaEnd] menos los ocupados
+  const free = [];
+  let cursor = toMinutes(startTime);
+  const jornadaEnd = toMinutes(endTime);
+  for (const occ of sorted) {
+    if (occ.end <= cursor) continue;
+    if (occ.start > cursor) free.push({ start: cursor, end: Math.min(occ.start, jornadaEnd) });
+    cursor = Math.max(cursor, occ.end);
+    if (cursor >= jornadaEnd) break;
+  }
+  if (cursor < jornadaEnd) free.push({ start: cursor, end: jornadaEnd });
+
+  const result = [];
+  for (const block of blocks) {
+    const bStart = toMinutes(block.start);
+    const bEnd = toMinutes(block.end);
+    const pieces = [];
+    for (const slot of free) {
+      const s = Math.max(bStart, slot.start);
+      const e = Math.min(bEnd, slot.end);
+      if (e - s >= MIN_BLOCK) pieces.push({ start: s, end: e });
+    }
+    if (pieces.length === 0) continue; // bloque sin horario libre -> descartado
+
+    const events = [...block.events];
+    // Si hay más piezas que eventos, no tiene sentido partir: quedarse con la
+    // pieza más grande (evita bloques vacíos).
+    if (events.length < pieces.length) {
+      const biggest = pieces.reduce((acc, p) => (p.end - p.start > acc.end - acc.start ? p : acc));
+      result.push({
+        start: toHHMM(biggest.start),
+        end: toHHMM(biggest.end),
+        events
+      });
+      continue;
+    }
+
+    // Repartir eventos del bloque a las piezas (en orden)
+    pieces.forEach((piece, i) => {
+      const isLast = i === pieces.length - 1;
+      const eventsForPiece = isLast ? events.splice(0) : events.splice(0, Math.ceil(events.length / (pieces.length - i)));
+      result.push({
+        start: toHHMM(piece.start),
+        end: toHHMM(piece.end),
+        events: eventsForPiece
+      });
+    });
+  }
+
+  return result.length > 0 ? result : null;
+};
+
 const inspectTableStructure = async (frameTree) => {
   try {
     const structure = await frameTree.evaluate(() => {
@@ -1713,10 +2113,22 @@ const registerBulkMissingDays = async (page, browser, company, usernameDaybeat, 
   const startTime = hours.start;
   const endTime = hours.end;
   
+  // Preguntar si se desea incluir información de Jira en los reportes
+  let useJira = false;
+  if (isConfigured()) {
+    const jiraResponse = await new Promise((resolve) => {
+      rl.question('\n¿Desea incluir información de Jira (issues/comentarios/worklogs) en los reportes? (si/no): ', (answer) => {
+        resolve(answer);
+      });
+    });
+    useJira = jiraResponse === 'si';
+  }
+  
   console.log(`\nHorario a usar: ${startTime} - ${endTime}`);
   console.log(`Categoría: ${selectedCategory.text}`);
   console.log(`Tipo de transacción: ${selectedTransaction.text}`);
   console.log(`Item: ${selectedItem.text}`);
+  console.log(`Incluir info de Jira: ${useJira ? 'Sí' : 'No'}`);
   console.log(`Días a registrar: ${missingDays.length}`);
   
   const confirmBulk = await new Promise((resolve) => {
@@ -1786,16 +2198,30 @@ const registerBulkMissingDays = async (page, browser, company, usernameDaybeat, 
       }
       
       let title, detail;
+      let extraContext = null;
+      let geminiUsed = false;
+      
+      // Consultar actividad de Jira para el día
+      if (useJira) {
+        console.log('  Consultando actividad en Jira...');
+        try {
+          const activity = await getDailyActivity(day);
+          extraContext = formatActivityForReport(activity);
+        } catch (err) {
+          console.log(`  ✗ Error consultando Jira para ${day}: ${err.message}`);
+        }
+      }
       
       if (context === 'no-commits') {
         if (process.env.GEMINI_API_KEY) {
           console.log('  Generando texto variado con Gemini AI...');
           const fakeCommits = ['Sin commits específicos'];
-          const aiResult = await generateWithGemini(fakeCommits, 'no-commits', day);
+          const aiResult = await generateWithGemini(fakeCommits, 'no-commits', day, extraContext);
           
           if (aiResult) {
             title = aiResult.title;
             detail = aiResult.detail;
+            geminiUsed = true;
             console.log('  ✓ Texto variado generado con Gemini AI');
           } else {
             console.log('  ✗ IA falló, usando texto genérico por defecto');
@@ -1811,11 +2237,12 @@ const registerBulkMissingDays = async (page, browser, company, usernameDaybeat, 
         }
       } else if (process.env.GEMINI_API_KEY && commitsToUse.length > 0) {
         console.log(`  Generando con Gemini AI (contexto: ${context})...`);
-        const aiResult = await generateWithGemini(commitsToUse, context, day);
+        const aiResult = await generateWithGemini(commitsToUse, context, day, extraContext);
         
         if (aiResult) {
           title = aiResult.title;
           detail = aiResult.detail;
+          geminiUsed = true;
           console.log('  ✓ Generado con Gemini AI');
         } else {
           console.log('  ✗ IA falló, usando método por defecto');
@@ -1832,6 +2259,11 @@ const registerBulkMissingDays = async (page, browser, company, usernameDaybeat, 
         const summary = summarizeCommits(commitsToUse);
         title = prefix + summary;
         detail = generateDetail(commitsToUse);
+      }
+      
+      // Agregar el bloque de Jira al detalle cuando no lo generó la IA
+      if (extraContext && !geminiUsed) {
+        detail = `${detail}\n\n${extraContext}`;
       }
       
       console.log(`  Título: ${title.substring(0, 50)}...`);
@@ -1927,6 +2359,388 @@ const registerBulkMissingDays = async (page, browser, company, usernameDaybeat, 
   
   console.log('====================================');
   
+  await closeConnection();
+  rl.close();
+  browser.close();
+};
+
+// Lee el estado actual del formulario de actualización de transacción
+// (transaccionesint_actualizar.asp): valores seleccionados y opciones de los
+// selects, campos de texto y detalle. Útil para el flujo interactivo de
+// corrección (Enter = conservar valor actual).
+const readTransactionForm = async (frameTree) => {
+  return frameTree.evaluate(() => {
+    const getVal = (sel) => {
+      const el = document.querySelector(sel);
+      return el ? el.value : '';
+    };
+    const getText = (sel) => {
+      const el = document.querySelector(sel);
+      return el && el.selectedIndex >= 0 ? el.options[el.selectedIndex].text.trim() : '';
+    };
+    const getOptions = (sel) => Array.from(document.querySelectorAll(sel))
+      .map(o => ({ value: o.value, text: o.textContent.trim() }))
+      .filter(o => o.value !== '');
+    return {
+      categoria: { value: getVal('select[name="id_categoria"]'), text: getText('select[name="id_categoria"]') },
+      tipo: { value: getVal('select[name="cod_tipotransaccion"]'), text: getText('select[name="cod_tipotransaccion"]') },
+      descripcion: getVal('input[name="descripcion_corta"]'),
+      fecha: getVal('input[name="fechaini"]'),
+      horaini: getVal('input[name="horaini"]'),
+      horafin: getVal('input[name="horafin"]'),
+      detalle: getVal('textarea[name="texto_largo"]'),
+      optionsCategoria: getOptions('select[name="id_categoria"]>option'),
+      optionsTipo: getOptions('select[name="cod_tipotransaccion"]>option')
+    };
+  });
+};
+
+// Núcleo reutilizable de corrección: aplica los campos indicados en `fields`
+// al formulario de actualización de una transacción y lo envía con manejo de
+// diálogo (patrón del registro por bloques). Si `updateHref` se omite se
+// asume que el frame ya está en el formulario (caso del flujo interactivo).
+// fields: { category, transactionType, descripcion, fecha, horaini, horafin,
+// detalle } — valores undefined se ignoran (conservan el valor actual);
+// fecha en formato DDMMYYYY. Devuelve { success, message } sin cerrar nada.
+const updateTransaction = async (frameTree, page, updateHref = null, fields = {}) => {
+  try {
+    if (updateHref) {
+      await frameTree.evaluate((href) => { window.location.href = href; }, updateHref);
+      await frameTree.waitForNavigation();
+      await delay(1200);
+    }
+    frameTree = page.frames().find(frame => frame.name() === 'tres');
+    if (!frameTree) return { success: false, message: 'Frame no encontrado' };
+    await frameTree.waitForSelector('select[name="id_categoria"]');
+
+    const setInput = (selector, value) =>
+      frameTree.$eval(selector, (el, v) => {
+        el.value = v;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      }, value);
+
+    // Mismo orden que el formulario de creación: categoría primero (carga
+    // dependiente del tipo) y luego el resto.
+    if (fields.category !== undefined) {
+      await frameTree.select('select[name="id_categoria"]', String(fields.category));
+      await delay(1500);
+    }
+    if (fields.transactionType !== undefined) {
+      await frameTree.select('select[name="cod_tipotransaccion"]', String(fields.transactionType));
+    }
+    if (fields.descripcion !== undefined && fields.descripcion.trim() !== '') {
+      await setInput('input[name="descripcion_corta"]', fields.descripcion.trim());
+    }
+    if (fields.fecha !== undefined) {
+      await setInput('input[name="fechaini"]', fields.fecha);
+    }
+    if (fields.horaini !== undefined) {
+      await setInput('input[name="horaini"]', fields.horaini);
+    }
+    if (fields.horafin !== undefined) {
+      await setInput('input[name="horafin"]', fields.horafin);
+    }
+    if (fields.detalle !== undefined && fields.detalle.trim() !== '') {
+      await setInput('textarea[name="texto_largo"]', fields.detalle.trim());
+    }
+
+    // Listener del dialog ANTES del click (evita race condition)
+    const dialogPromise = new Promise((resolve) => {
+      const timeout = setTimeout(() => resolve({ handled: false, message: '' }), 8000);
+      page.once('dialog', async (dialog) => {
+        clearTimeout(timeout);
+        const message = dialog.message();
+        console.log(`  Diálogo: ${message}`);
+        await dialog.accept();
+        resolve({ handled: true, message });
+      });
+    });
+    await frameTree.click('input[type="submit"][class="bot"]');
+    const result = await dialogPromise;
+
+    if (!result.handled) return { success: false, message: 'Sin respuesta del servidor (timeout)' };
+    return { success: /exitosamente/i.test(result.message), message: result.message };
+  } catch (err) {
+    return { success: false, message: err.message };
+  }
+};
+
+// Opción de menú: corregir / mover un registro existente. Daybeat NO expone
+// borrado de transacciones (verificado en la app real); la única mutación es
+// el UPDATE del formulario transaccionesint_actualizar.asp. "Eliminar" un
+// registro = corregirlo o moverlo (p.ej. cambiar la fecha para liberar un
+// día mal registrado). Reutiliza parseTransactionTable (listado) y
+// updateTransaction (edición).
+const correctRegistration = async (page, browser, company, usernameDaybeat, password, holidays = []) => {
+  console.log('====================================');
+  console.log('CORREGIR / MOVER REGISTRO');
+  console.log('====================================');
+
+  let frameTree = page.frames().find(frame => frame.name() === 'tres');
+  if (!frameTree) {
+    console.log('Frame no encontrado');
+    browser.close();
+    return;
+  }
+
+  await frameTree.waitForSelector('input');
+  await frameTree.type('input[name="id_cliente"]', company);
+  await frameTree.type('input[name="login"]', usernameDaybeat);
+  await frameTree.type('input[name="password"]', password);
+  await delay(1000);
+  await frameTree.click('input[type="submit"]');
+  await frameTree.waitForNavigation();
+
+  console.log('Login completado, esperando carga de página...');
+  await delay(3000);
+
+  const currentUser = await getCurrentUser(page, rl);
+  if (currentUser) {
+    console.log(`\n[INFO] Filtrando registros del usuario: ${currentUser}`);
+  }
+
+  const frameOne = page.frames().find(frame => frame.name() === 'uno');
+  if (!frameOne) {
+    console.log('ERROR: Frame "uno" no encontrado');
+    browser.close();
+    return;
+  }
+  await frameOne.waitForSelector('div', { timeout: 5000 });
+  const divHandle = await frameOne.evaluateHandle(() => {
+    const elements = Array.from(document.querySelectorAll('div'));
+    return elements.find(el => el.textContent.trim() === 'Requerimientos');
+  });
+  await delay(1000);
+  if (divHandle) {
+    await frameOne.evaluate(el => {
+      const event = new MouseEvent('mouseover', {
+        bubbles: true,
+        cancelable: true,
+        view: window
+      });
+      el.dispatchEvent(event);
+    }, divHandle);
+  }
+
+  frameTree = page.frames().find(frame => frame.name() === 'tres');
+  await frameTree.waitForSelector('div');
+  const divHandleConsulta = await frameTree.evaluateHandle(() => {
+    const elements = Array.from(document.querySelectorAll('div'));
+    return elements.find(el => el.textContent.trim() === 'Consultar');
+  });
+  if (divHandleConsulta) {
+    await frameTree.evaluate(el => el.click(), divHandleConsulta);
+    await frameTree.waitForNavigation();
+  }
+
+  // Mostrar todos los requerimientos (desde 01/01/2000)
+  frameTree = page.frames().find(frame => frame.name() === 'tres');
+  await frameTree.waitForSelector('input');
+  const inputHandle = await frameTree.$('input[name="re_fechad"][type="text"]');
+  if (inputHandle) {
+    await frameTree.evaluate(el => el.focus(), inputHandle);
+    await frameTree.evaluate((el, value) => {
+      el.value = value;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    }, inputHandle, '01012000');
+    await frameTree.click('input[type="image"]');
+    await frameTree.waitForNavigation();
+  }
+
+  // Seleccionar sección (reusando la ruta cacheada si existe)
+  frameTree = page.frames().find(frame => frame.name() === 'tres');
+  const links = await listElements(frameTree, 'a');
+
+  const cachedPath = loadPathCache();
+  let useCachedPath = false;
+
+  if (cachedPath?.section?.text && cachedPath?.item?.text) {
+    const sectionExists = links.some(l => normalizeText(l.text) === normalizeText(cachedPath.section.text));
+    if (sectionExists) {
+      console.log(`\nRuta anterior: ${cachedPath.section.text} > ${cachedPath.item.text}`);
+      const answer = await questionUserResponse(frameTree, '\n¿Usar la misma ruta? (si/no): ');
+      if (answer === 'si') useCachedPath = true;
+    } else {
+      console.log('\nLa sección anterior ya no existe. Seleccione manualmente.');
+    }
+  }
+
+  if (useCachedPath) {
+    const selectedLink = links.find(l => l.text === cachedPath.section.text);
+    const linkHandle = await frameTree.evaluateHandle((text, selector) => {
+      const elements = Array.from(document.querySelectorAll(selector));
+      return elements.find(el => el.textContent.trim() === text);
+    }, selectedLink.text, 'a');
+    if (linkHandle) await frameTree.evaluate(el => el.click(), linkHandle);
+  } else {
+    await whriteAndNavigateElementSelect(frameTree, 'a', links);
+  }
+  await frameTree.waitForNavigation();
+
+  // Seleccionar item: el link con el texto del item es el detalle
+  // (itemsint_actualizar.asp), no el formulario de creación.
+  frameTree = page.frames().find(frame => frame.name() === 'tres');
+  if (useCachedPath) {
+    const otherLinks = await listElements(frameTree, 'a');
+    const itemIdx = otherLinks.findIndex(l => normalizeText(l.text) === normalizeText(cachedPath.item.text));
+    if (itemIdx >= 0) {
+      const itemHandle = await frameTree.evaluateHandle((text, selector) => {
+        const elements = Array.from(document.querySelectorAll(selector));
+        return elements.find(el => el.textContent.trim() === text);
+      }, otherLinks[itemIdx].text, 'a');
+      if (itemHandle) await itemHandle.click();
+      await frameTree.waitForNavigation();
+    }
+  } else {
+    await whriteAndNavigateElementSelect(frameTree, 'a', await listElements(frameTree, 'a'));
+    await frameTree.waitForNavigation();
+  }
+
+  frameTree = page.frames().find(frame => frame.name() === 'tres');
+  await frameTree.waitForSelector('table');
+  const itemDetailUrl = await frameTree.evaluate(() => window.location.href);
+
+  const today = new Date();
+  const defaultDateStr = `${String(today.getDate()).padStart(2, '0')}/${String(today.getMonth() + 1).padStart(2, '0')}/${today.getFullYear()}`;
+
+  let keepCorrecting = true;
+  while (keepCorrecting) {
+    const dateAnswer = await questionUserResponse(frameTree, `\nFecha del registro a corregir (DD/MM/AAAA) [${defaultDateStr}]: `);
+    const dateStr = dateAnswer.trim() === '' ? defaultDateStr : dateAnswer.trim();
+
+    // Re-navegar al detalle para refrescar la tabla
+    await frameTree.evaluate((href) => { window.location.href = href; }, itemDetailUrl);
+    await frameTree.waitForNavigation();
+    await delay(1200);
+    frameTree = page.frames().find(frame => frame.name() === 'tres');
+    if (!frameTree) break;
+    await frameTree.waitForSelector('table');
+
+    const [dd, mm, yyyy] = dateStr.split('/');
+    const targetDate = `${yyyy}-${mm}-${dd}`;
+    const rows = await parseTransactionTable(frameTree, targetDate, currentUser);
+
+    if (rows.length === 0) {
+      console.log(`\nNo hay registros del usuario en ${dateStr}.`);
+      const again = await questionUserResponse(frameTree, '¿Desea probar con otra fecha? (si/no): ');
+      if (again.trim() !== 'si') keepCorrecting = false;
+      continue;
+    }
+
+    console.log('\nRegistros encontrados:');
+    rows.forEach((r, i) => console.log(`  ${i + 1}. ${r.start} - ${r.end}  ${r.desc || ''}`));
+    const pick = await questionUserResponse(frameTree, `\nSeleccione el registro a corregir (1-${rows.length}) o Enter para volver: `);
+    const pickIdx = parseInt(pick, 10) - 1;
+    if (isNaN(pickIdx) || pickIdx < 0 || pickIdx >= rows.length) {
+      continue; // vuelve a pedir la fecha
+    }
+
+    const row = rows[pickIdx];
+    if (!row.updateHref) {
+      console.log('  ✗ No se pudo obtener el link de actualización del registro.');
+      continue;
+    }
+
+    // Navegar al formulario de actualización y leer el estado actual
+    await frameTree.evaluate((href) => { window.location.href = href; }, row.updateHref);
+    await frameTree.waitForNavigation();
+    await delay(1200);
+    frameTree = page.frames().find(frame => frame.name() === 'tres');
+    if (!frameTree) break;
+    await frameTree.waitForSelector('select[name="id_categoria"]');
+    const form = await readTransactionForm(frameTree);
+
+    const fmtDate = (f) => f && f.length === 8 ? `${f.slice(0, 2)}/${f.slice(2, 4)}/${f.slice(4)}` : (f || '');
+    console.log(`\nRegistro seleccionado: ${row.start} - ${row.end}  ${row.desc || ''}`);
+    console.log(`  Categoría: ${form.categoria.text} | Tipo: ${form.tipo.text}`);
+    console.log(`  Fecha: ${fmtDate(form.fecha)} | Horario: ${form.horaini} - ${form.horafin}`);
+    console.log('\nIngrese el nuevo valor para cada campo (Enter = conservar el actual):');
+
+    const fields = {};
+
+    console.log('\nCATEGORÍA:');
+    form.optionsCategoria.forEach((o, i) => console.log(`  ${i + 1}. ${o.text}`));
+    const catAnswer = await questionUserResponse(frameTree, `Categoría actual: ${form.categoria.text}. Nueva (número, Enter = mantener): `);
+    const catIdx = parseInt(catAnswer, 10) - 1;
+    if (!isNaN(catIdx) && catIdx >= 0 && catIdx < form.optionsCategoria.length) {
+      fields.category = form.optionsCategoria[catIdx].value;
+    }
+
+    console.log('\nTIPO DE TRANSACCIÓN:');
+    form.optionsTipo.forEach((o, i) => console.log(`  ${i + 1}. ${o.text}`));
+    const tipoAnswer = await questionUserResponse(frameTree, `Tipo actual: ${form.tipo.text}. Nuevo (número, Enter = mantener): `);
+    const tipoIdx = parseInt(tipoAnswer, 10) - 1;
+    if (!isNaN(tipoIdx) && tipoIdx >= 0 && tipoIdx < form.optionsTipo.length) {
+      fields.transactionType = form.optionsTipo[tipoIdx].value;
+    }
+
+    const descAnswer = await questionUserResponse(frameTree, `\nDescripción actual: ${form.descripcion || '(vacía)'}\nNueva descripción (Enter = mantener): `);
+    if (descAnswer.trim() !== '') fields.descripcion = descAnswer.trim();
+
+    const fechaAnswer = await questionUserResponse(frameTree, `Fecha actual: ${fmtDate(form.fecha)}. Nueva (DD/MM/AAAA, Enter = mantener): `);
+    if (fechaAnswer.trim() !== '') {
+      const fd = fechaAnswer.trim().split('/');
+      if (fd.length === 3 && fd[0].trim() && fd[1].trim() && fd[2].trim()) {
+        fields.fecha = `${fd[0].trim().padStart(2, '0')}${fd[1].trim().padStart(2, '0')}${fd[2].trim()}`;
+      } else {
+        console.log('  Formato de fecha inválido, se mantiene la actual.');
+      }
+    }
+
+    const hiAnswer = await questionUserResponse(frameTree, `Hora inicio actual: ${form.horaini}. Nueva (HHMM, Enter = mantener): `);
+    if (/^\d{4}$/.test(hiAnswer.trim())) fields.horaini = hiAnswer.trim();
+    const hfAnswer = await questionUserResponse(frameTree, `Hora fin actual: ${form.horafin}. Nueva (HHMM, Enter = mantener): `);
+    if (/^\d{4}$/.test(hfAnswer.trim())) fields.horafin = hfAnswer.trim();
+
+    const detAnswer = await questionUserResponse(frameTree, `\nDetalle actual: ${form.detalle || '(vacío)'}\nNuevo detalle (Enter = mantener): `);
+    if (detAnswer.trim() !== '') fields.detalle = detAnswer.trim();
+
+    if (Object.keys(fields).length === 0) {
+      console.log('\nNo se modificó ningún campo.');
+      const again = await questionUserResponse(frameTree, '¿Desea corregir otro registro? (si/no): ');
+      if (again.trim() !== 'si') keepCorrecting = false;
+      continue;
+    }
+
+    console.log('\nCAMBIOS A APLICAR:');
+    if (fields.category !== undefined) {
+      const newText = form.optionsCategoria.find(o => o.value === String(fields.category))?.text || fields.category;
+      console.log(`  Categoría: ${form.categoria.text} -> ${newText}`);
+    }
+    if (fields.transactionType !== undefined) {
+      const newText = form.optionsTipo.find(o => o.value === String(fields.transactionType))?.text || fields.transactionType;
+      console.log(`  Tipo: ${form.tipo.text} -> ${newText}`);
+    }
+    if (fields.descripcion !== undefined) console.log(`  Descripción: ${form.descripcion || '(vacía)'} -> ${fields.descripcion}`);
+    if (fields.fecha !== undefined) console.log(`  Fecha: ${fmtDate(form.fecha)} -> ${fmtDate(fields.fecha)}`);
+    if (fields.horaini !== undefined) console.log(`  Hora inicio: ${form.horaini} -> ${fields.horaini}`);
+    if (fields.horafin !== undefined) console.log(`  Hora fin: ${form.horafin} -> ${fields.horafin}`);
+    if (fields.detalle !== undefined) console.log(`  Detalle: ${form.detalle || '(vacío)'} -> ${fields.detalle}`);
+
+    const confirm = await questionUserResponse(frameTree, '\n¿Desea actualizar el registro? (si/no): ');
+    if (confirm.trim() !== 'si') {
+      console.log('Actualización cancelada.');
+      continue;
+    }
+
+    const result = await updateTransaction(frameTree, page, null, fields);
+    if (result.success) {
+      console.log('  ✓ Registro actualizado.');
+    } else {
+      console.log(`  ✗ Error al actualizar: ${result.message}`);
+      if (result.message.includes('traslapa')) {
+        console.log('  El horario se traslapa con otra transacción del mismo día.');
+      }
+    }
+
+    const again = await questionUserResponse(frameTree, '\n¿Desea corregir otro registro? (si/no): ');
+    if (again.trim() !== 'si') keepCorrecting = false;
+  }
+
+  console.log('Proceso finalizado.');
+  await closeConnection();
   rl.close();
   browser.close();
 };
@@ -2016,15 +2830,28 @@ const registerNewTransaction = async (frameTree, page, autoData = null, cachedCa
   console.log('2. Con IA (Gemini)');
   console.log('3. Automático fake (basado en días anteriores)');
   console.log('4. Manual');
+  if (isConfigured()) {
+    console.log('5. Con información de Jira');
+  }
   console.log('-------------------------');
 
-  const mode = await questionUserResponse(frameTree, 'Seleccione modo (1/2/3/4): ');
+  const mode = await questionUserResponse(frameTree, 'Seleccione modo (1/2/3/4' + (isConfigured() ? '/5' : '') + '): ');
+
+  // Opción de registro: un solo bloque (jornada completa) o varios bloques
+  // según la actividad del día (solo en modos automáticos con horarios)
+  let blockMode = '1';
+  if (mode === '1' || mode === '2' || mode === '5') {
+    const resp = await questionUserResponse(frameTree, '¿Cómo desea registrar? (1: Un solo bloque / 2: Varios bloques según actividad): ');
+    blockMode = resp.trim() === '2' ? '2' : '1';
+  }
 
   let title = null;
   let formattedDate = null;
   let startTime = null;
   let endTime = null;
   let detail = null;
+  let selectedJiraActivity = null; // actividad Jira elegida en modo 5 (para bloques)
+  let userExtraContext = null;     // contexto adicional del modo IA (para bloques)
   let today = new Date();
   let dd = String(today.getDate()).padStart(2, '0');
   let mm = String(today.getMonth() + 1).padStart(2, '0');
@@ -2084,7 +2911,8 @@ const registerNewTransaction = async (frameTree, page, autoData = null, cachedCa
     console.log(`Horario: ${startTime} - ${endTime}`);
     console.log('-------------------------');
 
-    const confirm = await questionUserResponse(frameTree, '¿Desea continuar con estos datos? (si/no): ');
+    // Con bloques la confirmación se difiere hasta después de la propuesta
+    const confirm = blockMode === '2' ? 'si' : await questionUserResponse(frameTree, '¿Desea continuar con estos datos? (si/no): ');
     if (confirm !== 'si') {
       console.log('Cambiando a modo manual...');
       title = null;
@@ -2138,6 +2966,7 @@ const registerNewTransaction = async (frameTree, page, autoData = null, cachedCa
         extraContext = await questionUserResponse(frameTree, 
           'Describa qué más hizo hoy (reuniones, debugging, diseño, etc.): ');
       }
+      userExtraContext = extraContext;
     }
     
     // Intentar generar con IA
@@ -2173,7 +3002,116 @@ const registerNewTransaction = async (frameTree, page, autoData = null, cachedCa
     console.log(`Horario: ${startTime} - ${endTime}`);
     console.log('-------------------------');
     
-    const confirm = await questionUserResponse(frameTree, '¿Desea continuar con estos datos? (si/no): ');
+    // Con bloques la confirmación se difiere hasta después de la propuesta
+    const confirm = blockMode === '2' ? 'si' : await questionUserResponse(frameTree, '¿Desea continuar con estos datos? (si/no): ');
+    if (confirm !== 'si') {
+      console.log('Cambiando a modo manual...');
+      title = null;
+    }
+  } else if (mode === '5') {
+    // Modo Con información de Jira
+    const rootDir = resolveRootDir(process.env.ROOT_DIR);
+    console.log('-------------------------');
+    console.log('Buscando repositorios en:', rootDir);
+    const repos = getReposWithCache(rootDir);
+    console.log(`Repositorios encontrados: ${repos.length}`);
+    
+    const author = getGitAuthor(repos);
+    if (author) {
+      console.log(`Filtrando commits por autor: ${author}`);
+    }
+    
+    let allCommits = [];
+    if (repos.length > 0) {
+      allCommits = repos.flatMap(repo => getTodayCommits(repo, author));
+      console.log(`Total de commits hoy: ${allCommits.length}`);
+      if (allCommits.length === 0) {
+        console.log('No hay commits hoy, usando últimos 3 días...');
+        allCommits = repos.flatMap(repo => getRecentCommits(repo, 3, author));
+        console.log(`Total de commits en últimos 3 días: ${allCommits.length}`);
+      }
+    }
+    
+    const hours = getLastUsedHours();
+    startTime = hours.start;
+    endTime = hours.end;
+    formattedDate = defaultDate;
+    
+    // Consultar actividad de Jira (issues + comentarios + worklogs)
+    let activity = null;
+    let jiraContext = null;
+    if (isConfigured()) {
+      console.log('Consultando actividad en Jira...');
+      try {
+        activity = await getDailyActivity(today);
+        if (activity.issues.length === 0 && activity.comments.length === 0 && activity.worklogs.length === 0) {
+          console.log('  Sin actividad registrada en Jira para hoy.');
+        } else {
+          console.log('------------------------------------');
+          console.log('ACTIVIDAD EN JIRA:');
+          console.log(formatActivityForReport(activity));
+          console.log('------------------------------------');
+          // Selección interactiva: marcar qué se incluye en el reporte
+          selectedJiraActivity = await selectJiraActivityMulti(activity);
+          const hasContent =
+            selectedJiraActivity.issues.length > 0 ||
+            selectedJiraActivity.comments.length > 0 ||
+            selectedJiraActivity.worklogs.length > 0;
+          jiraContext = hasContent ? formatActivityForReport(selectedJiraActivity) : null;
+        }
+      } catch (err) {
+        console.log(`  ✗ Error consultando Jira: ${err.message}`);
+      }
+    } else {
+      console.log('  No hay ATLASSIAN_API_TOKEN. Se usará solo commits.');
+    }
+    
+    // Generar reporte con IA o por defecto
+    let geminiUsed = false;
+    if (process.env.GEMINI_API_KEY && allCommits.length > 0) {
+      console.log('  Generando con Gemini AI...');
+      const aiResult = await generateWithGemini(allCommits, 'same-day', null, jiraContext);
+      if (aiResult) {
+        title = aiResult.title;
+        detail = aiResult.detail;
+        geminiUsed = true;
+        console.log('  ✓ Generado con Gemini AI');
+      } else {
+        console.log('  ✗ IA falló, usando método por defecto');
+      }
+    } else if (!process.env.GEMINI_API_KEY) {
+      console.log('  No hay GEMINI_API_KEY, usando método por defecto');
+    }
+    
+    if (!geminiUsed) {
+      if (allCommits.length > 0) {
+        title = summarizeCommits(allCommits);
+        detail = generateDetail(allCommits);
+      } else if (activity && activity.issues.length > 0) {
+        const firstIssue = activity.issues[0];
+        title = smartTruncate(`Actividad en Jira: ${firstIssue.key} ${firstIssue.summary || ''}`, 100);
+        detail = jiraContext;
+      } else {
+        title = generateFakeSummary(allCommits);
+        detail = generateDetail(allCommits);
+      }
+      
+      // Agregar el bloque de Jira al detalle cuando no lo generó la IA
+      if (jiraContext && detail) {
+        detail = `${detail}\n\n${jiraContext}`;
+      }
+    }
+    
+    console.log('-------------------------');
+    console.log('RESUMEN CON JIRA:');
+    console.log(`Título: ${title}`);
+    console.log(`Detalle: ${detail}`);
+    console.log(`Fecha: ${dd}/${mm}/${yyyy}`);
+    console.log(`Horario: ${startTime} - ${endTime}`);
+    console.log('-------------------------');
+    
+    // Con bloques la confirmación se difiere hasta después de la propuesta
+    const confirm = blockMode === '2' ? 'si' : await questionUserResponse(frameTree, '¿Desea continuar con estos datos? (si/no): ');
     if (confirm !== 'si') {
       console.log('Cambiando a modo manual...');
       title = null;
@@ -2220,6 +3158,229 @@ const registerNewTransaction = async (frameTree, page, autoData = null, cachedCa
       title = null;
     }
   }
+
+  // Validación anti-duplicado: leer los rangos ya registrados del día en este
+  // item y avisar. No bloquea: el solape de Daybeat es por fecha Y hora, así
+  // que registrar otra cosa con horas distintas es válido.
+  let existingRanges = null;
+  if (title && formattedDate) {
+    const currentUser = await getCurrentUser(page, rl);
+    const dayStr = `${dd}/${mm}/${yyyy}`;
+    existingRanges = await getExistingRanges(
+      frameTree, page, dayStr, currentUser,
+      selectedCategoryValue, selectedTransactionValue
+    );
+    if (existingRanges && existingRanges.count > 0) {
+      console.log('---------------------------------------------------');
+      console.log(`⚠ El día ${dd}/${mm}/${yyyy} ya tiene transacciones registradas en este item:`);
+      for (const r of existingRanges.ranges) {
+        const desc = r.desc ? `  (${r.desc})` : '';
+        console.log(`  ${r.start} - ${r.end}${desc}`);
+      }
+      console.log('---------------------------------------------------');
+      const answerReg = await questionUserResponse(frameTree, '¿Desea registrar de todos modos? (si/no): ');
+      if (answerReg !== 'si') {
+        console.log('Registro cancelado (día ya registrado).');
+        await finishOrContinue(page, page.browser());
+        return frameTree;
+      }
+    }
+  }
+
+  // Registro por bloques (opcional): reparte el día en varios bloques según
+  // la actividad con horario (commits, comentarios y worklogs de Jira).
+  let blocks = null;
+  if (blockMode === '2' && title && startTime && endTime) {
+    const rootDirBlocks = resolveRootDir(process.env.ROOT_DIR);
+    const reposBlocks = getReposWithCache(rootDirBlocks);
+    const authorBlocks = getGitAuthor(reposBlocks);
+    const dayStr = `${dd}/${mm}/${yyyy}`;
+    const events = [];
+    for (const repo of reposBlocks) {
+      for (const c of getCommitsWithTime(repo, dayStr, authorBlocks)) {
+        events.push({ time: c.time, label: c.message, kind: 'commit', weight: 1 });
+      }
+    }
+    if (selectedJiraActivity) {
+      for (const comment of selectedJiraActivity.comments) {
+        const time = comment.created ? isoToLocalHHMM(comment.created) : null;
+        if (time) {
+          events.push({ time, label: `Comentario ${comment.issueKey}: ${comment.body}`, kind: 'jira', weight: 1 });
+        }
+      }
+      for (const worklog of selectedJiraActivity.worklogs) {
+        const time = worklog.started ? isoToLocalHHMM(worklog.started) : null;
+        if (time) {
+          events.push({
+            time,
+            label: `Worklog ${worklog.issueKey}: ${worklog.timeSpent}`,
+            kind: 'jira',
+            weight: parseTimeSpentHours(worklog.timeSpent)
+          });
+        }
+      }
+    }
+    for (const ev of events) ev.minutes = toMinutes(ev.time.replace(':', ''));
+    blocks = buildDayBlocks(events.filter(ev => !isNaN(ev.minutes)), startTime, endTime);
+
+    // Ajustar los bloques a los horarios libres (día parcialmente registrado)
+    if (blocks && existingRanges && existingRanges.count > 0) {
+      const adjusted = intersectBlocksWithFree(blocks, existingRanges.ranges, startTime, endTime);
+      if (adjusted) {
+        console.log('  Bloques ajustados a los horarios libres del día:');
+        blocks = adjusted;
+      } else {
+        console.log('  No hay horarios libres para los bloques propuestos.');
+        blocks = null;
+      }
+    }
+
+    if (blocks) {
+      // Las incidencias no tienen hora: se adjuntan al bloque con más actividad
+      if (selectedJiraActivity && selectedJiraActivity.issues.length > 0) {
+        let maxIdx = 0;
+        for (let i = 1; i < blocks.length; i++) {
+          if (blocks[i].events.length > blocks[maxIdx].events.length) maxIdx = i;
+        }
+        blocks[maxIdx].issues = selectedJiraActivity.issues;
+      }
+      console.log('-------------------------');
+      console.log('BLOQUES PROPUESTOS (según actividad del día):');
+      for (let i = 0; i < blocks.length; i++) {
+        const b = blocks[i];
+        console.log(`  ${i + 1}. ${b.start} - ${b.end}  (${b.events.length} actividad(es))`);
+        console.log(`     ${(b.events[0]?.label || '').substring(0, 90)}`);
+      }
+      console.log('-------------------------');
+      const okBlocks = await questionUserResponse(frameTree, '¿Desea registrar estos bloques? (si/no): ');
+      if (okBlocks !== 'si') blocks = null;
+    } else {
+      console.log('  No hay suficiente actividad con horario para dividir el día. Se usará un solo bloque.');
+    }
+  }
+
+  // ---- Registro por bloques (multi-transacción del mismo día) ----
+  if (blocks) {
+    const browser = page.browser();
+    const formUrl = await frameTree.evaluate(() => window.location.href);
+    // El handler global de diálogos es para un solo envío; durante el loop
+    // cada bloque maneja su propio diálogo y se restaura al final.
+    page.removeAllListeners('dialog');
+
+    let blocksOk = true;
+    for (let i = 0; i < blocks.length && blocksOk; i++) {
+      const block = blocks[i];
+      const blockCommits = block.events.filter(ev => ev.kind === 'commit').map(ev => ev.label);
+      const jiraLabels = block.events.filter(ev => ev.kind === 'jira').map(ev => ev.label);
+
+      let blockTitle;
+      let blockDetail;
+      if (blockCommits.length > 0) {
+        blockTitle = summarizeCommits(blockCommits);
+        blockDetail = generateDetail(blockCommits);
+      } else {
+        blockTitle = smartTruncate(block.events[0]?.label || 'Actividad registrada', 100);
+        blockDetail = block.events.map(ev => `- ${ev.label}`).join('\n') || 'Actividad del día';
+      }
+      if (jiraLabels.length > 0) {
+        blockDetail += `\n\nActividad en Jira:\n${jiraLabels.map(l => `  - ${l}`).join('\n')}`;
+      }
+      if (block.issues && block.issues.length > 0) {
+        blockDetail += `\n\nIncidencias:\n${block.issues.map(issue => `  - ${issue.key}: ${issue.summary || 'Sin resumen'}`).join('\n')}`;
+      }
+
+      // Con IA (modo 2): generar por bloque; el contexto adicional va al primero
+      if (mode === '2' && process.env.GEMINI_API_KEY && blockCommits.length > 0) {
+        const aiResult = await generateWithGemini(blockCommits, 'same-day', null, i === 0 ? userExtraContext : null);
+        if (aiResult) {
+          blockTitle = aiResult.title;
+          blockDetail = aiResult.detail;
+        }
+      }
+
+      if (i > 0) {
+        // Re-navegar al formulario para dejarlo fresco
+        await frameTree.evaluate((href) => {
+          window.location.href = href;
+        }, formUrl);
+        await frameTree.waitForNavigation();
+        await delay(1500);
+        frameTree = page.frames().find(frame => frame.name() === 'tres');
+        await frameTree.waitForSelector('select');
+
+        // La recarga resetea los selects obligatorios: re-seleccionar
+        // categoría (esperando la carga dependiente) y tipo de transacción.
+        if (selectedCategoryValue) {
+          await frameTree.select('select[name="id_categoria"]', selectedCategoryValue);
+          await delay(1500);
+        }
+        if (selectedTransactionValue) {
+          await frameTree.select('select[name="cod_tipotransaccion"]', selectedTransactionValue);
+        }
+      }
+
+      await frameTree.type('input[name="descripcion_corta"]', blockTitle);
+      await frameTree.type('input[name="fechaini"]', formattedDate);
+      await frameTree.type('input[name="horaini"]', block.start);
+      await frameTree.type('input[name="horafin"]', block.end);
+      await frameTree.type('textarea[name="texto_largo"]', blockDetail);
+
+      // Listener del dialog ANTES del click (evita race condition)
+      const dialogPromise = new Promise((resolve) => {
+        const timeout = setTimeout(() => resolve({ handled: false, message: '' }), 8000);
+        page.once('dialog', async (dialog) => {
+          clearTimeout(timeout);
+          const message = dialog.message();
+          console.log(`  Diálogo: ${message}`);
+          await dialog.accept();
+          resolve({
+            handled: true,
+            success: message.includes('éxitosamente') || message.includes('exitosamente'),
+            message
+          });
+        });
+      });
+      await frameTree.click('input[type="submit"][class="bot"]');
+      const result = await dialogPromise;
+
+      if (!result.handled || !result.success) {
+        blocksOk = false;
+        if (result.message && result.message.includes('traslapa')) {
+          console.log(`  ✗ El periodo de la transacción se traslapa con otra del mismo día (bloque ${i + 1}: ${block.start}-${block.end}).`);
+        } else {
+          console.log(`  ✗ Error registrando el bloque ${i + 1} (${block.start}-${block.end})`);
+        }
+      } else {
+        console.log(`  ✓ Bloque ${i + 1}/${blocks.length} (${block.start} - ${block.end}) registrado`);
+      }
+    }
+
+    // Restaurar el handler global de diálogos para el siguiente envío
+    page.on('dialog', dialog => handleGlobalDialog(dialog, page, browser));
+    saveHours(blocks[0].start, blocks[blocks.length - 1].end);
+
+    if (blocksOk) {
+      await finishOrContinue(page, browser);
+    } else {
+      // No matar la aplicación: avisar y volver al menú (pregunta si registrar
+      // otra actividad o salir), igual que el flujo de éxito.
+      console.log('No se pudieron registrar todos los bloques.');
+      await finishOrContinue(page, browser);
+    }
+    return frameTree;
+  }
+
+  // Confirmación diferida del bloque único: con bloques habilitados, la
+  // pregunta se hace después de la propuesta de bloques (si no se registraron)
+  if (blockMode === '2' && title) {
+    const confirm = await questionUserResponse(frameTree, '¿Desea continuar con estos datos? (si/no): ');
+    if (confirm !== 'si') {
+      console.log('Cambiando a modo manual...');
+      title = null;
+    }
+  }
+
+  // ---- Registro de un solo bloque (comportamiento original) ----
 
   // Escribir input descripcion corta.
   if (title) {
@@ -2282,10 +3443,31 @@ const finishOrContinue = async (page, browser) => {
     await registerNewTransaction(frameTree, page);
   } else {
     console.log('Proceso finalizado.');
+    await closeConnection();
     rl.close();
     browser.close();
   }
 }
+
+// Handler global de diálogos del formulario de transacción (un solo envío).
+// Durante el registro por bloques se retira temporalmente y se restaura al
+// final del loop (cada bloque maneja su propio diálogo).
+const handleGlobalDialog = async (dialog, page, browser) => {
+  console.log('-------------------------');
+  console.log('ALERTA ENCONTRADA:');
+  console.log('-------------------------');
+  console.log(dialog.message());
+  if (dialog.message().trim() === 'Transacción ingresada éxitosamente') {
+    await dialog.accept();
+    await finishOrContinue(page, browser);
+  } else {
+    await dialog.accept();
+    console.log('ERROR AL REGISTRAR, EJECUTE NUEVAMENTE.');
+    await closeConnection();
+    rl.close();
+    browser.close();
+  }
+};
 
 const delay = (time) => {
   return new Promise(function (resolve) {
@@ -2294,7 +3476,8 @@ const delay = (time) => {
 }
 
 (async () => {
-  const browser = await puppeteer.launch({ headless: false, });
+  // HEADLESS: 'true' oculta el navegador (sin ventana); 'false' lo muestra.
+  const browser = await puppeteer.launch({ headless: process.env.HEADLESS === 'true' });
   const page = await browser.newPage();
 
   const linkDaybeat = process.env.LINK_DAYBEAT;
@@ -2320,24 +3503,26 @@ const delay = (time) => {
     console.log('1. Registrar actividad');
     console.log('2. Ver días sin registro');
     console.log('3. Registro masivo de días sin registro');
-    console.log('4. Re-escanear repositorios');
-    console.log('5. Salir');
+    console.log('4. Corregir / mover registro');
+    console.log('5. Re-escanear repositorios');
+    console.log('6. Salir');
     console.log('====================================');
 
     const mainOption = await new Promise((resolve) => {
-      rl.question('Seleccione opción (1/2/3/4/5): ', (answer) => {
+      rl.question('Seleccione opción (1/2/3/4/5/6): ', (answer) => {
         resolve(answer);
       });
     });
 
-    if (mainOption === '5') {
+    if (mainOption === '6') {
       console.log('Saliendo...');
+      await closeConnection();
       rl.close();
       browser.close();
       return;
     }
 
-    if (mainOption === '4') {
+    if (mainOption === '5') {
       const rootDir = resolveRootDir(process.env.ROOT_DIR);
       console.log('\nRe-escaneando repositorios...');
       const repos = getReposWithCache(rootDir, true);
@@ -2361,6 +3546,11 @@ const delay = (time) => {
       return;
     }
 
+    if (mainOption === '4') {
+      await correctRegistration(page, browser, company, usernameDaybeat, password, holidays);
+      return;
+    }
+
     if (mainOption === '1') {
       keepRunning = false;
       break;
@@ -2370,21 +3560,7 @@ const delay = (time) => {
 
   const cachedPath = loadPathCache();
 
-  page.on('dialog', async dialog => {
-    console.log("-------------------------");
-    console.log('ALERTA ENCONTRADA:');
-    console.log("-------------------------");
-    console.log(dialog.message());
-    if (dialog.message().trim() === 'Transacción ingresada éxitosamente') {
-      await dialog.accept();
-      await finishOrContinue(page, browser);
-    } else {
-      await dialog.accept();
-      console.log('ERROR AL REGISTRAR, EJECUTE NUEVAMENTE.');
-      rl.close();
-      browser.close();
-    }
-  });
+  page.on('dialog', dialog => handleGlobalDialog(dialog, page, browser));
 
 
   // Obtener el frame con el nombre "tres"
