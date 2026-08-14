@@ -3231,7 +3231,12 @@ const registerNewTransaction = async (frameTree, page, autoData = null, cachedCa
         blocks = adjusted;
       } else {
         console.log('  No hay horarios libres para los bloques propuestos.');
-        blocks = null;
+        console.log('  El día ya está completamente registrado.');
+        console.log('  Ejecutá de nuevo y usá la opción 4 "Corregir / mover registro" del menú principal para modificar los registros existentes.');
+        await closeConnection();
+        rl.close();
+        page.browser().close();
+        return frameTree;
       }
     }
 
@@ -3244,12 +3249,63 @@ const registerNewTransaction = async (frameTree, page, autoData = null, cachedCa
         }
         blocks[maxIdx].issues = selectedJiraActivity.issues;
       }
+
+      // Generar título/detalle de CADA bloque antes del preview (con IA en
+      // modos 2 y 5). Se guardan en block.title/block.detail: lo que muestra
+      // el preview es exactamente lo que se registra.
+      const useAI = process.env.GEMINI_API_KEY;
+      for (let i = 0; i < blocks.length; i++) {
+        const block = blocks[i];
+        const blockCommits = block.events.filter(ev => ev.kind === 'commit').map(ev => ev.label);
+        const jiraLabels = block.events.filter(ev => ev.kind === 'jira').map(ev => ev.label);
+
+        // Contexto combinado: Jira (labels + issues) y el contexto extra del
+        // modo IA (solo en el primer bloque)
+        const contextParts = [];
+        if (jiraLabels.length > 0) {
+          contextParts.push('Actividad en Jira:\n' + jiraLabels.map(l => `  - ${l}`).join('\n'));
+        }
+        if (block.issues && block.issues.length > 0) {
+          contextParts.push('Incidencias:\n' + block.issues.map(issue => `  - ${issue.key}: ${issue.summary || 'Sin resumen'}`).join('\n'));
+        }
+        const blockContext = contextParts.length > 0 ? contextParts.join('\n\n') : null;
+        const extraContext = [blockContext, i === 0 ? userExtraContext : null].filter(Boolean).join('\n\n') || null;
+
+        // Con IA: los labels Jira se pasan como actividad cuando no hay commits
+        if (useAI && (mode === '2' || mode === '5') && (blockCommits.length > 0 || jiraLabels.length > 0)) {
+          const activitySource = blockCommits.length > 0 ? blockCommits : jiraLabels;
+          const aiResult = await generateWithGemini(activitySource, 'same-day', null, extraContext);
+          if (aiResult) {
+            block.title = aiResult.title;
+            block.detail = aiResult.detail;
+            continue;
+          }
+        }
+
+        // Fallback sin IA (o si falló): reglas por commits, o actividad Jira
+        if (blockCommits.length > 0) {
+          block.title = summarizeCommits(blockCommits);
+          block.detail = generateDetail(blockCommits);
+        } else if (jiraLabels.length > 0) {
+          const firstLabel = jiraLabels[0];
+          block.title = smartTruncate(`Actividad en Jira: ${firstLabel}`, 100);
+          block.detail = jiraLabels.map(l => `- ${l}`).join('\n');
+        } else {
+          block.title = 'Actividad registrada';
+          block.detail = 'Actividad del día';
+        }
+        if (blockContext) {
+          block.detail += `\n\n${blockContext}`;
+        }
+      }
+
       console.log('-------------------------');
       console.log('BLOQUES PROPUESTOS (según actividad del día):');
       for (let i = 0; i < blocks.length; i++) {
         const b = blocks[i];
         console.log(`  ${i + 1}. ${b.start} - ${b.end}  (${b.events.length} actividad(es))`);
-        console.log(`     ${(b.events[0]?.label || '').substring(0, 90)}`);
+        console.log(`     Título: ${(b.title || '').substring(0, 110)}`);
+        console.log(`     Detalle: ${(b.detail || '').replace(/\n/g, ' ').substring(0, 150)}`);
       }
       console.log('-------------------------');
       const okBlocks = await questionUserResponse(frameTree, '¿Desea registrar estos bloques? (si/no): ');
@@ -3270,33 +3326,9 @@ const registerNewTransaction = async (frameTree, page, autoData = null, cachedCa
     let blocksOk = true;
     for (let i = 0; i < blocks.length && blocksOk; i++) {
       const block = blocks[i];
-      const blockCommits = block.events.filter(ev => ev.kind === 'commit').map(ev => ev.label);
-      const jiraLabels = block.events.filter(ev => ev.kind === 'jira').map(ev => ev.label);
-
-      let blockTitle;
-      let blockDetail;
-      if (blockCommits.length > 0) {
-        blockTitle = summarizeCommits(blockCommits);
-        blockDetail = generateDetail(blockCommits);
-      } else {
-        blockTitle = smartTruncate(block.events[0]?.label || 'Actividad registrada', 100);
-        blockDetail = block.events.map(ev => `- ${ev.label}`).join('\n') || 'Actividad del día';
-      }
-      if (jiraLabels.length > 0) {
-        blockDetail += `\n\nActividad en Jira:\n${jiraLabels.map(l => `  - ${l}`).join('\n')}`;
-      }
-      if (block.issues && block.issues.length > 0) {
-        blockDetail += `\n\nIncidencias:\n${block.issues.map(issue => `  - ${issue.key}: ${issue.summary || 'Sin resumen'}`).join('\n')}`;
-      }
-
-      // Con IA (modo 2): generar por bloque; el contexto adicional va al primero
-      if (mode === '2' && process.env.GEMINI_API_KEY && blockCommits.length > 0) {
-        const aiResult = await generateWithGemini(blockCommits, 'same-day', null, i === 0 ? userExtraContext : null);
-        if (aiResult) {
-          blockTitle = aiResult.title;
-          blockDetail = aiResult.detail;
-        }
-      }
+      // El contenido (título/detalle) ya se generó en la fase de preview
+      const blockTitle = block.title || 'Actividad registrada';
+      const blockDetail = block.detail || 'Actividad del día';
 
       if (i > 0) {
         // Re-navegar al formulario para dejarlo fresco
@@ -3462,7 +3494,12 @@ const handleGlobalDialog = async (dialog, page, browser) => {
     await finishOrContinue(page, browser);
   } else {
     await dialog.accept();
-    console.log('ERROR AL REGISTRAR, EJECUTE NUEVAMENTE.');
+    if (dialog.message().includes('traslapa')) {
+      console.log('\nEl periodo se traslapa con otra transacción del mismo día.');
+      console.log('Ejecutá de nuevo y usá la opción 4 "Corregir / mover registro" del menú principal para modificar los registros existentes.');
+    } else {
+      console.log('ERROR AL REGISTRAR, EJECUTE NUEVAMENTE.');
+    }
     await closeConnection();
     rl.close();
     browser.close();
