@@ -5,3 +5,4 @@ node_modules/
 .daybeat-path.json
 .daybeat-jira-tokens.json
 .daybeat-ai.json
+.daybeat-registrations.json

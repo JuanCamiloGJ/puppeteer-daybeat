@@ -82,11 +82,12 @@ Duplicate-registration guard (all individual modes 1-5, before the blocks propos
 
 The main menu includes option "3. Registro masivo de días sin registro" which:
 1. Logs into Daybeat
-2. Navigates through all projects and items to find missing registration days
-3. Shows the list of business days without registrations
-4. Asks user to select ONCE: section, item, category, and transaction type
-5. If Jira is configured (either OAuth or API token), asks ONCE whether to include Jira info (issues/comments/worklogs) in the reports
-6. For each missing day:
+2. Asks for the period to register (1: último mes, 2: últimos 2 meses, 3: últimos 3 meses, 4: últimos 15 días, 5: últimos 7 días — `askPeriod`, shared with option 2)
+3. Uses the per-user registrations cache (`.daybeat-registrations.json`) when it covers the requested period: asks each run "cache/reescan" (default cache) and skips the slow project/item walk; auto-rescans when the period starts before the cached `scannedFrom` window. First run (or rescan) walks all projects/items and persists the result.
+4. Shows the list of business days without registrations
+5. Asks user to select ONCE: section, item, category, and transaction type
+6. If Jira is configured (either OAuth or API token), asks ONCE whether to include Jira info (issues/comments/worklogs) in the reports
+7. For each missing day:
    - Gets commits from that specific day (filtered by author)
    - If no commits that day, uses commits from last 3 days before that date
    - If Jira is enabled, fetches `getDailyActivity(day)` for that specific date and passes it as `extraContext` to the AI (or appends it to the detail when no AI)
@@ -95,34 +96,37 @@ The main menu includes option "3. Registro masivo de días sin registro" which:
    - Registers the transaction with default schedule (from `.daybeat-history.json`)
    - Handles dialog confirmation (registers listener BEFORE submit to avoid race condition)
    - Handles errors gracefully (continues with next day)
-7. Shows final summary with:
+8. Shows final summary with:
    - Total days processed
    - Successfully registered days
    - Days with errors (if any)
+9. Merges the successfully registered days into the registrations cache before closing, so a second run skips them without re-scanning
 
-This feature automates filling in missing registrations for the last month, using commit-based summaries for each day.
-
-## Missing registrations report
-
-The main menu includes option "2. Ver días sin registro" which:
-1. Logs into Daybeat
-2. Navigates through all projects and items
-3. Extracts transaction dates from the "Fecha Transacción" column (handles pagination automatically)
-4. Compares against business days (Mon-Fri) from the last 30 days
-5. Shows which business days have no registrations
-
-This feature iterates through all projects and items to collect all transaction dates, which can take several minutes depending on the number of projects. Pagination is handled automatically when an item has more than ~15 transactions.
+This feature automates filling in missing registrations, using commit-based summaries for each day.
 
 ## Missing registrations report
 
 The main menu includes option "2. Ver días sin registro" which:
 1. Logs into Daybeat
-2. Navigates through all projects and items
-3. Extracts transaction dates from the "Fecha Transacción" column (handles pagination automatically)
-4. Compares against business days (Mon-Fri) from the last 30 days
-5. Shows which business days have no registrations
+2. Asks for the period (last month / 2 / 3 months / 15 days / 7 days — `askPeriod`)
+3. Uses the per-user registrations cache when it covers the period (asks "cache/reescan", default cache); otherwise navigates through all projects and items
+4. Extracts transaction dates from the "Fecha Transacción" column (handles pagination automatically)
+5. Compares against business days (Mon-Fri) of the selected period
+6. Shows which business days have no registrations
 
-This feature iterates through all projects and items to collect all transaction dates, which can take several minutes depending on the number of projects. Pagination is handled automatically when an item has more than ~15 transactions.
+This feature iterates through all projects and items to collect all transaction dates, which can take several minutes depending on the number of projects (skipped when the cache is used). Pagination is handled automatically when an item has more than ~15 transactions.
+
+## Missing registrations report
+
+The main menu includes option "2. Ver días sin registro" which:
+1. Logs into Daybeat
+2. Asks for the period (last month / 2 / 3 months / 15 days / 7 days — `askPeriod`)
+3. Uses the per-user registrations cache when it covers the period (asks "cache/reescan", default cache); otherwise navigates through all projects and items
+4. Extracts transaction dates from the "Fecha Transacción" column (handles pagination automatically)
+5. Compares against business days (Mon-Fri) of the selected period
+6. Shows which business days have no registrations
+
+This feature iterates through all projects and items to collect all transaction dates, which can take several minutes depending on the number of projects (skipped when the cache is used). Pagination is handled automatically when an item has more than ~15 transactions.
 
 ## Commit summary rules
 
@@ -156,6 +160,7 @@ Central module (like `lib/jira-report.js`) that manages AI providers for title/d
 - `.daybeat-path.json`: caches the daily registration path (section, item, category, transaction type). Auto-updates after each successful registration. Prompts user to reuse cached path on next registration. Added to `.gitignore`.
 - `.daybeat-jira-tokens.json`: persists the OAuth 2.1 tokens of the Jira module (client info, tokens, discovery state). Auto-refresh on every run; interactive re-auth only when the refresh fails. Added to `.gitignore`.
 - `.daybeat-ai.json`: persists the AI provider config (active provider, API keys, models, opencode key source). Created/edited from menu "6. Config IA". Added to `.gitignore`.
+- `.daybeat-registrations.json`: caches per user (keyed by the detected Daybeat user) the dates that already have registrations, with `scannedFrom` (start of the scanned window) and `lastScan`. Used by options 2 and 3 to skip the slow project/item walk on repeat runs — asks each run "cache/reescan" (default cache), auto-rescans when the requested period starts before `scannedFrom`, and is updated after every full scan and after successful bulk registrations. Added to `.gitignore`.
 - `holidays.json`: stores holidays for the current year (format: `{ "year": 2026, "holidays": ["DD/MM/YYYY", ...] }`). Auto-prompts for update when year changes. Shared between users (not in `.gitignore`).
 
 ## Main menu
