@@ -56,7 +56,7 @@ const {
 
 // Funciones auxiliares.
 
-const listElements = async (frame, selector, filterHref = null) => {
+const listElements = async (frame, selector, filterHref = null, silent = false) => {
   // Cuando filtramos por href (ej. secciones), esperar el DOM específico:
   // el URL del frame puede cambiar ANTES de que carguen los enlaces reales.
   if (filterHref) {
@@ -81,14 +81,17 @@ const listElements = async (frame, selector, filterHref = null) => {
       .filter(l => l.text.length > 0)
       .filter(l => !fhref || (l.href && l.href.includes(fhref)))
   , filterHref);
-  // Mostrar opciones al usuario
-  console.log('---------------------');
-  console.log('OPCIONES DISPONIBLES:');
-  console.log('---------------------');
-  links.forEach((item, index) => {
-    console.log(`${index + 1}. ${item.text}`);
-  });
-  console.log('---------------------');
+  // Mostrar opciones al usuario (se omite cuando el selector visual es
+  // @inquirer/select, que renderiza su propia lista).
+  if (!silent) {
+    console.log('---------------------');
+    console.log('OPCIONES DISPONIBLES:');
+    console.log('---------------------');
+    links.forEach((item, index) => {
+      console.log(`${index + 1}. ${item.text}`);
+    });
+    console.log('---------------------');
+  }
 
   return links;
 }
@@ -172,17 +175,12 @@ const selectItemAndNavigate = async (frameTree, page, items, navigateToDetail = 
     console.log('No se encontraron items en esta sección.');
     return null;
   }
-  console.log('---------------------');
-  console.log('OPCIONES DISPONIBLES:');
-  console.log('---------------------');
-  items.forEach((item, index) => {
-    console.log(`${index + 1}. ${item.text}`);
-  });
-  console.log('---------------------');
 
-  const choice = await questionUserResponse(frameTree, 'Por favor, elige una opción (número): ');
-  const index = parseInt(choice) - 1;
-  if (index < 0 || index >= items.length) {
+  const index = await prompt.askSelect({
+    message: 'Seleccione el item:',
+    choices: items.map((item, i) => ({ name: item.text, value: i }))
+  });
+  if (index === null || index === undefined || index < 0 || index >= items.length) {
     console.log('Opción inválida.');
     return null;
   }
@@ -245,28 +243,28 @@ const normalizeText = (s) => s ? s.replace(/\s+/g, ' ').trim() : '';
 
 const whriteAndNavigateElementSelect = async (frame, selector, links) => {
   try {
-    const choice = await prompt.ask('Por favor, elige una opción (número): ');
-    const index = parseInt(choice) - 1;
-
-    if (index >= 0 && index < links.length) {
-      const selectedItem = links[index];
-      // Find + click en un solo evaluate: evita el handle huérfano si el
-      // frame navega entre medio (el click dispara la navegación).
-      const clicked = await frame.evaluate((text, sel) => {
-        const elements = Array.from(document.querySelectorAll(sel));
-        const el = elements.find(e => e.textContent.trim() === text);
-        if (el) el.click();
-        return !!el;
-      }, selectedItem.text, selector);
-      if (!clicked) {
-        console.log(`No se encontró la opción "${selectedItem.text}" en la página.`);
-        return null;
-      }
-      return selectedItem.text;
-    } else {
+    const index = await prompt.askSelect({
+      message: 'Por favor, elige una opción (número):',
+      choices: links.map((l, i) => ({ name: l.text, value: i }))
+    });
+    if (index === null || index === undefined || index < 0 || index >= links.length) {
       console.log('Opción inválida.');
       return null;
     }
+    const selectedItem = links[index];
+    // Find + click en un solo evaluate: evita el handle huérfano si el
+    // frame navega entre medio (el click dispara la navegación).
+    const clicked = await frame.evaluate((text, sel) => {
+      const elements = Array.from(document.querySelectorAll(sel));
+      const el = elements.find(e => e.textContent.trim() === text);
+      if (el) el.click();
+      return !!el;
+    }, selectedItem.text, selector);
+    if (!clicked) {
+      console.log(`No se encontró la opción "${selectedItem.text}" en la página.`);
+      return null;
+    }
+    return selectedItem.text;
   } catch (err) {
     console.log('Error seleccionando la opción:', err.message);
     return null;
@@ -274,14 +272,12 @@ const whriteAndNavigateElementSelect = async (frame, selector, links) => {
 }
 
 const selectOptionSelector = async (frame, selector, links) => {
-  const choice = await prompt.ask('Por favor, elige una opción (número): ');
-  const index = parseInt(choice) - 1;
-
-  if (index >= 0 && index < links.length) {
-    // Interactuar con la opción seleccionada
+  const index = await prompt.askSelect({
+    message: 'Por favor, elige una opción (número):',
+    choices: links.map((l, i) => ({ name: l.text, value: i }))
+  });
+  if (index !== null && index !== undefined && index >= 0 && index < links.length) {
     const selectedItem = links[index];
-    // console.log(`Seleccionaste: `, selectedItem.text);
-    // Encontrar y seleccionar el elemento seleccionado.
     await frame.select(selector, selectedItem.value); // Selecciona la opción
   } else {
     console.log('Opción inválida.');
@@ -305,50 +301,42 @@ const questionUserResponse = async (frame, question) => {
 // espacio marca/desmarca, "a" selecciona todos, enter confirma.
 // La primera opción "Seleccionar todos" marca todo de una; si no, solo los
 // marcados entran al contexto del reporte.
-const ALL_JIRA = '__ALL__';
-
 const selectJiraActivityMulti = async (activity) => {
-  const { default: checkbox, Separator } = await import('@inquirer/checkbox');
-  const choices = [{ name: 'Seleccionar todos', value: ALL_JIRA }];
-
+  const groups = [];
   if (activity.issues.length > 0) {
-    choices.push(new Separator('-- Incidencias --'));
-    activity.issues.slice(0, 15).forEach((issue, i) => {
-      const status = issue.status ? ` (${issue.status})` : '';
-      choices.push({
-        name: `${issue.key}: ${issue.summary || 'Sin resumen'}${status}`,
+    groups.push({
+      title: 'Incidencias',
+      items: activity.issues.slice(0, 15).map((issue, i) => ({
+        name: `${issue.key}: ${issue.summary || 'Sin resumen'}${issue.status ? ` (${issue.status})` : ''}`,
         value: { kind: 'issue', i }
-      });
+      }))
     });
   }
   if (activity.comments.length > 0) {
-    choices.push(new Separator('-- Comentarios --'));
-    activity.comments.slice(0, 15).forEach((comment, i) => {
-      const time = comment.created ? ` (${comment.created.substring(0, 16).replace('T', ' ')})` : '';
-      choices.push({
-        name: `${comment.issueKey}: "${smartTruncate(comment.body, 150)}"${time}`,
+    groups.push({
+      title: 'Comentarios',
+      items: activity.comments.slice(0, 15).map((comment, i) => ({
+        name: `${comment.issueKey}: "${smartTruncate(comment.body, 150)}"${comment.created ? ` (${comment.created.substring(0, 16).replace('T', ' ')})` : ''}`,
         value: { kind: 'comment', i }
-      });
+      }))
     });
   }
   if (activity.worklogs.length > 0) {
-    choices.push(new Separator('-- Worklogs --'));
-    activity.worklogs.slice(0, 15).forEach((worklog, i) => {
-      choices.push({
+    groups.push({
+      title: 'Worklogs',
+      items: activity.worklogs.slice(0, 15).map((worklog, i) => ({
         name: `${worklog.issueKey}: ${worklog.timeSpent}${worklog.comment ? ` — "${smartTruncate(worklog.comment, 150)}"` : ''}`,
         value: { kind: 'worklog', i }
-      });
+      }))
     });
   }
 
-  const answer = await checkbox({
+  const answer = await prompt.askCheckbox({
     message: 'Seleccione la actividad de Jira a incluir (espacio: marcar, a: todos, enter: confirmar):',
-    pageSize: 12,
-    choices
+    groups
   });
 
-  if (answer.includes(ALL_JIRA)) {
-    prompt.restoreReadline();
+  if (answer.includes(prompt.ALL)) {
     return activity;
   }
 
@@ -358,7 +346,6 @@ const selectJiraActivityMulti = async (activity) => {
     else if (sel.kind === 'comment') filtered.comments.push(activity.comments[sel.i]);
     else filtered.worklogs.push(activity.worklogs[sel.i]);
   }
-  prompt.restoreReadline();
   return filtered;
 }
 
@@ -368,22 +355,17 @@ const selectJiraActivityMulti = async (activity) => {
 
 // Menú de período compartido por "Ver días sin registro" y "Registro masivo".
 const askPeriod = async (action) => {
-  console.log(`\nSeleccione el período a ${action}:`);
-  console.log('1. Último mes');
-  console.log('2. Últimos 2 meses');
-  console.log('3. Últimos 3 meses');
-  console.log('4. Últimos 15 días');
-  console.log('5. Últimos 7 días');
-
-  const answer = await prompt.ask('Seleccione opción (1/2/3/4/5): ');
-  const periods = {
-    '1': { days: 30, label: '1 mes' },
-    '2': { days: 60, label: '2 meses' },
-    '3': { days: 90, label: '3 meses' },
-    '4': { days: 15, label: '15 días' },
-    '5': { days: 7, label: '7 días' }
-  };
-  const selected = periods[answer] || periods['1'];
+  const periods = [
+    { name: 'Último mes', value: { days: 30, label: '1 mes' } },
+    { name: 'Últimos 2 meses', value: { days: 60, label: '2 meses' } },
+    { name: 'Últimos 3 meses', value: { days: 90, label: '3 meses' } },
+    { name: 'Últimos 15 días', value: { days: 15, label: '15 días' } },
+    { name: 'Últimos 7 días', value: { days: 7, label: '7 días' } }
+  ];
+  const selected = (await prompt.askSelect({
+    message: `Seleccione el período a ${action}:`,
+    choices: periods
+  })) || periods[0].value;
   console.log(`\nPeríodo seleccionado: ${selected.label}`);
   return selected;
 };
@@ -407,8 +389,7 @@ const checkHolidaysYear = async () => {
   }
   console.log('====================================\n');
 
-  const answer = await questionUserResponse(null, '¿Desea ingresar los festivos del año actual? (si/no): ');
-  if (answer === 'si') {
+  if (await prompt.askConfirm('¿Desea ingresar los festivos del año actual?')) {
     console.log('Ingrese los festivos en formato DD/MM/YYYY separados por coma:');
     console.log('Ejemplo: 01/01/2026,12/01/2026,23/03/2026');
     const input = await questionUserResponse(null, 'Festivos: ');
@@ -1243,10 +1224,12 @@ console.log(`\n\nTotal de registros encontrados: ${existingDates.length}`);
   await delay(1500);
   
   frameTree = page.frames().find(frame => frame.name() === 'tres');
-  const links = await listElements(frameTree, 'a', 'itemsint.asp');
-  
-  console.log('Seleccione la sección donde registrar:');
-  const sectionIndex = parseInt(await prompt.ask('Número de sección: ')) - 1;
+  const links = await listElements(frameTree, 'a', 'itemsint.asp', true);
+
+  const sectionIndex = await prompt.askSelect({
+    message: 'Seleccione la sección donde registrar:',
+    choices: links.map((l, i) => ({ name: l.text, value: i }))
+  });
   
   if (sectionIndex < 0 || sectionIndex >= links.length) {
     console.log('Opción inválida');
@@ -1282,8 +1265,11 @@ console.log(`\n\nTotal de registros encontrados: ${existingDates.length}`);
   await frameTree.waitForSelector('select');
   
   console.log('\nSELECCIONE LA CATEGORIA: ');
-  const optionsCategory = await listElements(frameTree, 'select[name="id_categoria"]>option');
-  const categoryIndex = parseInt(await prompt.ask('Número de categoría: ')) - 1;
+  const optionsCategory = await listElements(frameTree, 'select[name="id_categoria"]>option', null, true);
+  const categoryIndex = await prompt.askSelect({
+    message: 'Número de categoría:',
+    choices: optionsCategory.map((o, i) => ({ name: o.text, value: i }))
+  });
   
   if (categoryIndex < 0 || categoryIndex >= optionsCategory.length) {
     console.log('Opción inválida');
@@ -1299,8 +1285,11 @@ console.log(`\n\nTotal de registros encontrados: ${existingDates.length}`);
   await delay(1500); // Esperar a que se carguen las opciones dinámicas
   
   console.log('\nSELECCIONE TIPO DE TRANSACCION: ');
-  const optionsTransaction = await listElements(frameTree, 'select[name="cod_tipotransaccion"]>option');
-  const transactionIndex = parseInt(await prompt.ask('Número de tipo de transacción: ')) - 1;
+  const optionsTransaction = await listElements(frameTree, 'select[name="cod_tipotransaccion"]>option', null, true);
+  const transactionIndex = await prompt.askSelect({
+    message: 'Número de tipo de transacción:',
+    choices: optionsTransaction.map((o, i) => ({ name: o.text, value: i }))
+  });
   
   if (transactionIndex < 0 || transactionIndex >= optionsTransaction.length) {
     console.log('Opción inválida');
@@ -1328,8 +1317,7 @@ console.log(`\n\nTotal de registros encontrados: ${existingDates.length}`);
   // Preguntar si se desea incluir información de Jira en los reportes
   let useJira = false;
   if (isConfigured()) {
-    const jiraResponse = await prompt.ask('\n¿Desea incluir información de Jira (issues/comentarios/worklogs) en los reportes? (si/no): ');
-    useJira = jiraResponse === 'si';
+    useJira = await prompt.askConfirm('¿Desea incluir información de Jira (issues/comentarios/worklogs) en los reportes?');
   }
   
   console.log(`\nHorario a usar: ${startTime} - ${endTime}`);
@@ -1339,9 +1327,7 @@ console.log(`\n\nTotal de registros encontrados: ${existingDates.length}`);
   console.log(`Incluir info de Jira: ${useJira ? 'Sí' : 'No'}`);
   console.log(`Días a registrar: ${missingDays.length}`);
   
-  const confirmBulk = await prompt.ask('\n¿Desea continuar con el registro masivo? (si/no): ');
-  
-  if (confirmBulk !== 'si') {
+  if (!(await prompt.askConfirm('¿Desea continuar con el registro masivo?'))) {
     console.log('Registro masivo cancelado');
     prompt.close();
     browser.close();
@@ -1767,7 +1753,7 @@ const correctRegistration = async (page, browser, company, usernameDaybeat, pass
 
   // Seleccionar sección (reusando la ruta cacheada si existe)
   frameTree = page.frames().find(frame => frame.name() === 'tres');
-  const links = await listElements(frameTree, 'a', 'itemsint.asp');
+  const links = await listElements(frameTree, 'a', 'itemsint.asp', true);
 
   const cachedPath = loadPathCache();
   let useCachedPath = false;
@@ -1776,8 +1762,7 @@ const correctRegistration = async (page, browser, company, usernameDaybeat, pass
     const sectionExists = links.some(l => normalizeText(l.text) === normalizeText(cachedPath.section.text));
     if (sectionExists) {
       console.log(`\nRuta anterior: ${cachedPath.section.text} > ${cachedPath.item.text}`);
-      const answer = await questionUserResponse(frameTree, '\n¿Usar la misma ruta? (si/no): ');
-      if (answer === 'si') useCachedPath = true;
+      useCachedPath = await prompt.askConfirm('\n¿Usar la misma ruta?');
     } else {
       console.log('\nLa sección anterior ya no existe. Seleccione manualmente.');
     }
@@ -1841,8 +1826,7 @@ const correctRegistration = async (page, browser, company, usernameDaybeat, pass
 
     if (rows.length === 0) {
       console.log(`\nNo hay registros del usuario en ${dateStr}.`);
-      const again = await questionUserResponse(frameTree, '¿Desea probar con otra fecha? (si/no): ');
-      if (again.trim() !== 'si') keepCorrecting = false;
+      if (!(await prompt.askConfirm('¿Desea probar con otra fecha?'))) keepCorrecting = false;
       continue;
     }
 
@@ -1916,8 +1900,7 @@ const correctRegistration = async (page, browser, company, usernameDaybeat, pass
 
     if (Object.keys(fields).length === 0) {
       console.log('\nNo se modificó ningún campo.');
-      const again = await questionUserResponse(frameTree, '¿Desea corregir otro registro? (si/no): ');
-      if (again.trim() !== 'si') keepCorrecting = false;
+      if (!(await prompt.askConfirm('¿Desea corregir otro registro?'))) keepCorrecting = false;
       continue;
     }
 
@@ -1936,8 +1919,7 @@ const correctRegistration = async (page, browser, company, usernameDaybeat, pass
     if (fields.horafin !== undefined) console.log(`  Hora fin: ${form.horafin} -> ${fields.horafin}`);
     if (fields.detalle !== undefined) console.log(`  Detalle: ${form.detalle || '(vacío)'} -> ${fields.detalle}`);
 
-    const confirm = await questionUserResponse(frameTree, '\n¿Desea actualizar el registro? (si/no): ');
-    if (confirm.trim() !== 'si') {
+    if (!(await prompt.askConfirm('\n¿Desea actualizar el registro?'))) {
       console.log('Actualización cancelada.');
       continue;
     }
@@ -1952,8 +1934,7 @@ const correctRegistration = async (page, browser, company, usernameDaybeat, pass
       }
     }
 
-    const again = await questionUserResponse(frameTree, '\n¿Desea corregir otro registro? (si/no): ');
-    if (again.trim() !== 'si') keepCorrecting = false;
+    if (!(await prompt.askConfirm('\n¿Desea corregir otro registro?'))) keepCorrecting = false;
   }
 
   console.log('Proceso finalizado.');
@@ -1976,7 +1957,7 @@ const registerNewTransaction = async (frameTree, page, autoData = null, cachedCa
 
   // CATEGORÍA
   console.log('SELECCIONE LA CATEGORIA: ');
-  const optionsCategory = await listElements(frameTree, 'select[name="id_categoria"]>option');
+  const optionsCategory = await listElements(frameTree, 'select[name="id_categoria"]>option', null, true);
   let selectedCategoryValue = null;
   let selectedCategoryText = null;
   
@@ -2005,7 +1986,7 @@ const registerNewTransaction = async (frameTree, page, autoData = null, cachedCa
 
   // TIPO DE TRANSACCIÓN
   console.log('SELECCIONE TIPO DE TRANSACCION: ');
-  const optionsTransaction = await listElements(frameTree, 'select[name="cod_tipotransaccion"]>option');
+  const optionsTransaction = await listElements(frameTree, 'select[name="cod_tipotransaccion"]>option', null, true);
   let selectedTransactionValue = null;
   let selectedTransactionText = null;
   
@@ -2131,8 +2112,7 @@ const registerNewTransaction = async (frameTree, page, autoData = null, cachedCa
     console.log('-------------------------');
 
     // Con bloques la confirmación se difiere hasta después de la propuesta
-    const confirm = blockMode === '2' ? 'si' : await questionUserResponse(frameTree, '¿Desea continuar con estos datos? (si/no): ');
-    if (confirm !== 'si') {
+    if (!(blockMode === '2' || await prompt.askConfirm('¿Desea continuar con estos datos?'))) {
       console.log('Cambiando a modo manual...');
       title = null;
     }
@@ -2179,9 +2159,7 @@ const registerNewTransaction = async (frameTree, page, autoData = null, cachedCa
         console.log(`  ... y ${allCommits.length - 10} más`);
       }
       
-      const wantContext = await questionUserResponse(frameTree, 
-        '\n¿Desea agregar contexto adicional para la IA? (si/no): ');
-      if (wantContext === 'si') {
+      if (await prompt.askConfirm('\n¿Desea agregar contexto adicional para la IA?')) {
         extraContext = await questionUserResponse(frameTree, 
           'Describa qué más hizo hoy (reuniones, debugging, diseño, etc.): ');
       }
@@ -2222,8 +2200,7 @@ const registerNewTransaction = async (frameTree, page, autoData = null, cachedCa
     console.log('-------------------------');
     
     // Con bloques la confirmación se difiere hasta después de la propuesta
-    const confirm = blockMode === '2' ? 'si' : await questionUserResponse(frameTree, '¿Desea continuar con estos datos? (si/no): ');
-    if (confirm !== 'si') {
+    if (!(blockMode === '2' || await prompt.askConfirm('¿Desea continuar con estos datos?'))) {
       console.log('Cambiando a modo manual...');
       title = null;
     }
@@ -2330,8 +2307,7 @@ const registerNewTransaction = async (frameTree, page, autoData = null, cachedCa
     console.log('-------------------------');
     
     // Con bloques la confirmación se difiere hasta después de la propuesta
-    const confirm = blockMode === '2' ? 'si' : await questionUserResponse(frameTree, '¿Desea continuar con estos datos? (si/no): ');
-    if (confirm !== 'si') {
+    if (!(blockMode === '2' || await prompt.askConfirm('¿Desea continuar con estos datos?'))) {
       console.log('Cambiando a modo manual...');
       title = null;
     }
@@ -2371,8 +2347,7 @@ const registerNewTransaction = async (frameTree, page, autoData = null, cachedCa
     console.log(`Horario: ${startTime} - ${endTime}`);
     console.log('-------------------------');
 
-    const confirm = await questionUserResponse(frameTree, '¿Desea continuar con estos datos? (si/no): ');
-    if (confirm !== 'si') {
+    if (!(await prompt.askConfirm('¿Desea continuar con estos datos?'))) {
       console.log('Cambiando a modo manual...');
       title = null;
     }
@@ -2397,8 +2372,7 @@ const registerNewTransaction = async (frameTree, page, autoData = null, cachedCa
         console.log(`  ${r.start} - ${r.end}${desc}`);
       }
       console.log('---------------------------------------------------');
-      const answerReg = await questionUserResponse(frameTree, '¿Desea registrar de todos modos? (si/no): ');
-      if (answerReg !== 'si') {
+      if (!(await prompt.askConfirm('¿Desea registrar de todos modos?'))) {
         console.log('Registro cancelado (día ya registrado).');
         await finishOrContinue(page, page.browser());
         return frameTree;
@@ -2527,8 +2501,7 @@ const registerNewTransaction = async (frameTree, page, autoData = null, cachedCa
         console.log(`     Detalle: ${(b.detail || '').replace(/\n/g, ' ').substring(0, 150)}`);
       }
       console.log('-------------------------');
-      const okBlocks = await questionUserResponse(frameTree, '¿Desea registrar estos bloques? (si/no): ');
-      if (okBlocks !== 'si') blocks = null;
+      if (!(await prompt.askConfirm('¿Desea registrar estos bloques?'))) blocks = null;
     } else {
       console.log('  No hay suficiente actividad con horario para dividir el día. Se usará un solo bloque.');
     }
@@ -2624,8 +2597,7 @@ const registerNewTransaction = async (frameTree, page, autoData = null, cachedCa
   // Confirmación diferida del bloque único: con bloques habilitados, la
   // pregunta se hace después de la propuesta de bloques (si no se registraron)
   if (blockMode === '2' && title) {
-    const confirm = await questionUserResponse(frameTree, '¿Desea continuar con estos datos? (si/no): ');
-    if (confirm !== 'si') {
+    if (!(await prompt.askConfirm('¿Desea continuar con estos datos?'))) {
       console.log('Cambiando a modo manual...');
       title = null;
     }
@@ -2642,8 +2614,7 @@ const registerNewTransaction = async (frameTree, page, autoData = null, cachedCa
 
   // Definir fecha
   if (!formattedDate) {
-    const responseDate = await questionUserResponse(frameTree, `¿La fecha que va registrar es ${dd}/${mm}/${yyyy} ? (si/no): `);
-    if (responseDate === 'si') {
+    if (await prompt.askConfirm(`¿La fecha que va registrar es ${dd}/${mm}/${yyyy}?`)) {
       formattedDate = defaultDate;
     } else {
       formattedDate = await questionUserResponse(frameTree, "Digite la fecha de la actividad formato ddmmyyyy: ");
@@ -2653,8 +2624,7 @@ const registerNewTransaction = async (frameTree, page, autoData = null, cachedCa
 
   // Definir horario
   if (!startTime) {
-    const response = await questionUserResponse(frameTree, '¿El horario a diligenciar es jornada completa de 7:30am a 5:30pm? (si/no): ');
-    if (response === 'si') {
+    if (await prompt.askConfirm('¿El horario a diligenciar es jornada completa de 7:30am a 5:30pm?')) {
       startTime = '0730';
       endTime = '1630';
     } else {
@@ -2684,11 +2654,9 @@ const registerNewTransaction = async (frameTree, page, autoData = null, cachedCa
 
 const finishOrContinue = async (page, browser) => {
   let frameTree = page.frames().find(frame => frame.name() === 'tres');
-  const response = await questionUserResponse(frameTree, '¿Deseas registrar otra actividad? (si/no): ');
-
-  if (response === 'si') {
+  if (await prompt.askConfirm('¿Desea registrar otra actividad?')) {
     console.log('====================================');
-    console.log('REGISTRANDO NUEVA ACTIVIDAD...', response);
+    console.log('REGISTRANDO NUEVA ACTIVIDAD...');
     console.log('====================================');
     await listAndNavigateNewTransaction(frameTree, page);
     await registerNewTransaction(frameTree, page);
@@ -2739,20 +2707,20 @@ const delay = (time) => {
 const showAIConfigMenu = async () => {
   let keepRunning = true;
   while (keepRunning) {
-    console.log('====================================');
-    console.log('CONFIGURACIÓN DE IA');
-    console.log('====================================');
     console.log(ai.getStatus());
     console.log('------------------------------------');
-    console.log('1. Cambiar provider activo');
-    console.log('2. Conectar OpenCode Zen (modelos gratis)');
-    console.log('3. Configurar Gemini (API key)');
-    console.log('4. Cambiar modelo');
-    console.log('5. Probar conexión');
-    console.log('6. Volver');
-    console.log('====================================');
 
-    const option = await prompt.ask('Seleccione opción (1/2/3/4/5/6): ');
+    const option = await prompt.askSelect({
+      message: 'Configuración de IA',
+      choices: [
+        { name: 'Cambiar provider activo', value: '1' },
+        { name: 'Conectar OpenCode Zen (modelos gratis)', value: '2' },
+        { name: 'Configurar Gemini (API key)', value: '3' },
+        { name: 'Cambiar modelo', value: '4' },
+        { name: 'Probar conexión', value: '5' },
+        { name: 'Volver', value: '6' }
+      ]
+    });
 
     if (option === '6') {
       keepRunning = false;
@@ -2761,16 +2729,16 @@ const showAIConfigMenu = async () => {
 
     if (option === '1') {
       const names = ai.getProviderNames();
-      console.log('Providers disponibles:');
-      names.forEach((name, index) => {
-        const label = name === 'opencode' ? 'OpenCode Zen (modelos gratis)' : 'Gemini';
-        console.log(`  ${index + 1}. ${label}`);
+      const choice = await prompt.askSelect({
+        message: 'Seleccione provider:',
+        choices: names.map((name) => ({
+          name: name === 'opencode' ? 'OpenCode Zen (modelos gratis)' : 'Gemini',
+          value: name
+        }))
       });
-      const choice = await prompt.ask('Seleccione provider: ');
-      const idx = parseInt(choice, 10) - 1;
-      if (idx >= 0 && idx < names.length) {
-        ai.setActiveProvider(names[idx]);
-        console.log(`  ✓ Provider activo: ${names[idx]}`);
+      if (choice) {
+        ai.setActiveProvider(choice);
+        console.log(`  ✓ Provider activo: ${choice}`);
       } else {
         console.log('  Opción inválida.');
       }
@@ -2780,8 +2748,8 @@ const showAIConfigMenu = async () => {
       const detected = ai.detectOpenCodeKey();
       if (detected) {
         console.log(`  ✓ Detectada key de opencode desde:\n    ${detected.source}`);
-        const useIt = await prompt.ask('¿Usar esta key? (si/no): ');
-        if (useIt === 'si') {
+        const useIt = await prompt.askConfirm('¿Usar esta key?');
+        if (useIt) {
           ai.saveOpenCodeKey(detected.key, detected.source);
           ai.setActiveProvider('opencode');
           console.log('  ✓ OpenCode Zen conectado y activo.');
@@ -2821,34 +2789,24 @@ const showAIConfigMenu = async () => {
         const zenModels = await ai.getZenModels();
         const freeModels = zenModels.filter(ai.isFreeModel);
         const paidModels = zenModels.filter(m => !ai.isFreeModel(m));
-        console.log('Modelos gratis de OpenCode Zen:');
-        freeModels.forEach((m, index) => {
-          console.log(`  ${index + 1}. ${m}`);
+        const choice = await prompt.askSelect({
+          message: 'Seleccione modelo:',
+          choices: [
+            ...freeModels.map((m) => ({ name: m, value: m })),
+            ...(paidModels.length > 0 ? [{ name: 'Ver todos los modelos (incluye pagos)', value: '__ALL__' }] : []),
+            { name: 'Otro (escribir ID)', value: '__OTHER__' }
+          ]
         });
-        const allOption = freeModels.length + 1;
-        const otherOption = freeModels.length + 2;
-        console.log(`  ${allOption}. Ver todos los modelos (incluye pagos)`);
-        console.log(`  ${otherOption}. Otro (escribir ID)`);
-        const choice = (await prompt.ask('Seleccione modelo: ')).trim();
-        const idx = parseInt(choice, 10) - 1;
-        if (idx >= 0 && idx < freeModels.length) {
-          model = freeModels[idx];
-        } else if (choice === String(allOption)) {
-          if (paidModels.length > 0) {
-            console.log('Todos los modelos de OpenCode Zen:');
-            paidModels.forEach((m, i) => {
-              console.log(`  ${i + 1}. ${m}`);
-            });
-            const choice2 = (await prompt.ask('Seleccione modelo: ')).trim();
-            const idx2 = parseInt(choice2, 10) - 1;
-            if (idx2 >= 0 && idx2 < paidModels.length) {
-              model = paidModels[idx2];
-            }
-          } else {
-            console.log('  No hay más modelos disponibles (lista de respaldo).');
-          }
-        } else if (choice === String(otherOption)) {
+        if (choice === '__ALL__') {
+          const choice2 = await prompt.askSelect({
+            message: 'Seleccione modelo:',
+            choices: paidModels.map((m) => ({ name: m, value: m }))
+          });
+          if (choice2) model = choice2;
+        } else if (choice === '__OTHER__') {
           model = (await prompt.ask('ID del modelo (ej. gpt-5.4-mini): ')).trim();
+        } else if (choice) {
+          model = choice;
         }
       } else {
         model = (await prompt.ask(`ID del modelo Gemini (actual: ${ai.getModel('gemini')}, Enter para no cambiar): `)).trim();
@@ -2896,19 +2854,18 @@ const showAIConfigMenu = async () => {
 
   let keepRunning = true;
   while (keepRunning) {
-    console.log('====================================');
-    console.log('¿QUÉ DESEA HACER?');
-    console.log('====================================');
-    console.log('1. Registrar actividad');
-    console.log('2. Ver días sin registro');
-    console.log('3. Registro masivo de días sin registro');
-    console.log('4. Corregir / mover registro');
-    console.log('5. Re-escanear repositorios');
-    console.log('6. Config IA');
-    console.log('7. Salir');
-    console.log('====================================');
-
-    const mainOption = await prompt.ask('Seleccione opción (1/2/3/4/5/6/7): ');
+    const mainOption = await prompt.askSelect({
+      message: '¿Qué desea hacer?',
+      choices: [
+        { name: 'Registrar actividad', value: '1' },
+        { name: 'Ver días sin registro', value: '2' },
+        { name: 'Registro masivo de días sin registro', value: '3' },
+        { name: 'Corregir / mover registro', value: '4' },
+        { name: 'Re-escanear repositorios', value: '5' },
+        { name: 'Config IA', value: '6' },
+        { name: 'Salir', value: '7' }
+      ]
+    });
 
     if (mainOption === '7') {
       console.log('Saliendo...');
@@ -3130,7 +3087,7 @@ const showAIConfigMenu = async () => {
     /////////////////////////////////////////////////////////
     frameTree = page.frames().find(frame => frame.name() === 'tres');
     console.log('[STAGE] listando secciones...');
-    const links = await listElements(frameTree, 'a', 'itemsint.asp');
+    const links = await listElements(frameTree, 'a', 'itemsint.asp', true);
     console.log(`[STAGE] Secciones encontradas: ${links.length}`);
     
     let useCachedPath = false;
@@ -3141,8 +3098,7 @@ const showAIConfigMenu = async () => {
       const sectionExists = links.some(l => normalizeText(l.text) === normalizeText(cachedPath.section.text));
       if (sectionExists) {
         console.log(`\nRuta anterior: ${cachedPath.section.text} > ${cachedPath.item.text} > ${cachedPath.category.text} > ${cachedPath.transactionType.text}`);
-        const answer = await questionUserResponse(frameTree, '\n¿Usar la misma ruta? (si/no): ');
-        if (answer === 'si') {
+        if (await prompt.askConfirm('\n¿Usar la misma ruta?')) {
           useCachedPath = true;
           selectedSectionText = cachedPath.section.text;
           selectedItemText = cachedPath.item.text;
