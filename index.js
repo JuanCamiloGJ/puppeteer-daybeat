@@ -370,11 +370,20 @@ const {
     /////////////////////////////////////////////////////////
     /**     DILIGENCIAR FORMULARIO PARA NUEVO REGISTRO.   **/
     /////////////////////////////////////////////////////////
-    registerNewTransaction(frameTree, page, null, 
-      useCachedPath ? cachedPath.category : null, 
-      useCachedPath ? cachedPath.transactionType : null,
-      selectedSectionText,
-      selectedItemText);
+    try {
+      await registerNewTransaction(frameTree, page, null,
+        useCachedPath ? cachedPath.category : null,
+        useCachedPath ? cachedPath.transactionType : null,
+        selectedSectionText,
+        selectedItemText);
+    } catch (err) {
+      console.log('✗ Error en el flujo de registro:');
+      console.log(err && err.stack ? err.stack : err);
+      await prompt.ask('Presione Enter para salir...');
+      await closeConnection();
+      prompt.close();
+      browser.close();
+    }
 
   } else {
     console.log('Frame no encontrado');
