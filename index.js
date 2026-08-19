@@ -86,16 +86,31 @@ const toLinuxPath = (p) => {
 
 // Funciones auxiliares.
 
-const listElements = async (frame, selector) => {
-  await frame.waitForSelector(selector);
+const listElements = async (frame, selector, filterHref = null) => {
+  // Cuando filtramos por href (ej. secciones), esperar el DOM específico:
+  // el URL del frame puede cambiar ANTES de que carguen los enlaces reales.
+  if (filterHref) {
+    const ready = await frame.waitForSelector(`a[href*="${filterHref}"]`, { timeout: 15000 })
+      .then(() => true)
+      .catch(() => false);
+    if (!ready) {
+      console.log(`No se encontraron elementos con href *${filterHref} en la página.`);
+      return [];
+    }
+  } else {
+    await frame.waitForSelector(selector);
+  }
   // Listar todos los links dentro del frame
-  const links = await frame.$$eval(selector, elements =>
-    elements.map(el => ({
-      href: el.href,
-      text: el.textContent.trim(),
-      value: el.value
-    }))
-  );
+  const links = await frame.$$eval(selector, (elements, fhref) =>
+    elements
+      .map(el => ({
+        href: el.href,
+        text: el.textContent.trim(),
+        value: el.value
+      }))
+      .filter(l => l.text.length > 0)
+      .filter(l => !fhref || (l.href && l.href.includes(fhref)))
+  , filterHref);
   // Mostrar opciones al usuario
   console.log('---------------------');
   console.log('OPCIONES DISPONIBLES:');
@@ -121,6 +136,18 @@ const collectAllItems = async (frameTree, page) => {
   const seen = new Set();
   for (let i = 0; i < ITEM_MAX_PAGES; i++) {
     frameTree = page.frames().find(frame => frame.name() === 'tres');
+    if (!frameTree) break;
+    // La navegación resuelve cuando el URL del frame cambia, pero el DOM del
+    // iframe carga DESPUÉS: leer la tabla antes de que exista devuelve [] y
+    // el menú aparece vacío. Esperar la tabla de items de esta página antes
+    // de evaluar (fail-soft: si no aparece, devolver lo recolectado).
+    const itemsReady = await frameTree.waitForSelector('a[href*="itemsint_actualizar.asp"]', { timeout: 15000 })
+      .then(() => true)
+      .catch(() => false);
+    if (!itemsReady) {
+      console.log('No se encontraron items en esta sección.');
+      break;
+    }
     const pageItems = await frameTree.evaluate(() => {
       return Array.from(document.querySelectorAll('tr'))
         .map(tr => {
@@ -171,6 +198,10 @@ const collectAllItems = async (frameTree, page) => {
 // elegido: detail = href del detalle (itemsint_actualizar.asp), de lo
 // contrario href del formulario de creación (transaccionesint_crear.asp).
 const selectItemAndNavigate = async (frameTree, page, items, navigateToDetail = false) => {
+  if (!items || items.length === 0) {
+    console.log('No se encontraron items en esta sección.');
+    return null;
+  }
   console.log('---------------------');
   console.log('OPCIONES DISPONIBLES:');
   console.log('---------------------');
@@ -208,8 +239,8 @@ const navigateFrameRobust = async (page, triggerFn, urlPredicate, timeoutMs = 20
     const frameTree = page.frames().find(frame => frame.name() === 'tres');
     try {
       await Promise.all([
-        frameTree.waitForNavigation({ timeout: 10000 }),
-        triggerFn(frameTree)
+        frameTree ? frameTree.waitForNavigation({ timeout: 10000 }) : Promise.resolve(),
+        triggerFn(frameTree || page)
       ]);
     } catch (err) {
       // Race (nav demasiado rápida) o frame desmontado: el sondeo de respaldo
@@ -217,37 +248,59 @@ const navigateFrameRobust = async (page, triggerFn, urlPredicate, timeoutMs = 20
     }
   }
   const deadline = Date.now() + timeoutMs;
+  let lastUrl = '';
   while (Date.now() < deadline) {
     const f = page.frames().find(frame => frame.name() === 'tres');
     if (f) {
       const url = await f.evaluate(() => window.location.href).catch(() => '');
+      if (url) lastUrl = url;
       if (url && urlPredicate(url)) return f;
     }
     await delay(250);
   }
-  throw new Error(`navigateFrameRobust: timeout esperando la navegación (${timeoutMs}ms)`);
+  throw new Error(`navigateFrameRobust: timeout esperando la navegación (${timeoutMs}ms) | última URL frame tres: ${lastUrl || 'sin frame tres'}`);
 }
+
+// Diagnóstico de etapas del flujo: imprime en qué punto estamos y la URL
+// actual del frame tres, para detectar dónde se detiene la ejecución sin
+// llegar a listar las secciones.
+const logStage = async (page, label) => {
+  const f = page.frames().find(frame => frame.name() === 'tres');
+  const url = f ? await f.evaluate(() => window.location.href).catch(() => '?') : 'SIN FRAME tres';
+  console.log(`[STAGE] ${label} | frame tres: ${url}`);
+  return f;
+};
 
 const normalizeText = (s) => s ? s.replace(/\s+/g, ' ').trim() : '';
 
 const whriteAndNavigateElementSelect = async (frame, selector, links) => {
   return new Promise((resolve) => {
     rl.question('Por favor, elige una opción (número): ', async (choice) => {
-      const index = parseInt(choice) - 1;
+      try {
+        const index = parseInt(choice) - 1;
 
-      if (index >= 0 && index < links.length) {
-        const selectedItem = links[index];
-        const linkHandle = await frame.evaluateHandle((text, selector) => {
-          const elements = Array.from(document.querySelectorAll(selector));
-          return elements.find(el => el.textContent.trim() === text);
-        }, selectedItem.text, selector);
-
-        if (linkHandle) {
-          await frame.evaluate(el => el.click(), linkHandle);
+        if (index >= 0 && index < links.length) {
+          const selectedItem = links[index];
+          // Find + click en un solo evaluate: evita el handle huérfano si el
+          // frame navega entre medio (el click dispara la navegación).
+          const clicked = await frame.evaluate((text, sel) => {
+            const elements = Array.from(document.querySelectorAll(sel));
+            const el = elements.find(e => e.textContent.trim() === text);
+            if (el) el.click();
+            return !!el;
+          }, selectedItem.text, selector);
+          if (!clicked) {
+            console.log(`No se encontró la opción "${selectedItem.text}" en la página.`);
+            resolve(null);
+            return;
+          }
+          resolve(selectedItem.text);
+        } else {
+          console.log('Opción inválida.');
+          resolve(null);
         }
-        resolve(selectedItem.text);
-      } else {
-        console.log('Opción inválida.');
+      } catch (err) {
+        console.log('Error seleccionando la opción:', err.message);
         resolve(null);
       }
     });
@@ -2063,7 +2116,7 @@ const registerBulkMissingDays = async (page, browser, company, usernameDaybeat, 
   await delay(1500);
   
   frameTree = page.frames().find(frame => frame.name() === 'tres');
-  const links = await listElements(frameTree, 'a');
+  const links = await listElements(frameTree, 'a', 'itemsint.asp');
   
   console.log('Seleccione la sección donde registrar:');
   const sectionIndex = await new Promise((resolve) => {
@@ -2593,13 +2646,16 @@ const correctRegistration = async (page, browser, company, usernameDaybeat, pass
       el.dispatchEvent(new Event('change', { bubbles: true }));
     }, inputHandle, '01012000');
     await navigateFrameRobust(page, async (ft) => {
-      await ft.click('input[type="image"]');
+      await ft.evaluate(() => {
+        const btn = document.querySelector('input[type="image"]');
+        if (btn) btn.click();
+      });
     }, (u) => u.includes('requerimientos.asp?flag=') && !u.includes('flag=resp'));
   }
 
   // Seleccionar sección (reusando la ruta cacheada si existe)
   frameTree = page.frames().find(frame => frame.name() === 'tres');
-  const links = await listElements(frameTree, 'a');
+  const links = await listElements(frameTree, 'a', 'itemsint.asp');
 
   const cachedPath = loadPathCache();
   let useCachedPath = false;
@@ -2797,6 +2853,7 @@ const correctRegistration = async (page, browser, company, usernameDaybeat, pass
 const listAndNavigateNewTransaction = async (frameTree, page) => {
   frameTree = page.frames().find(frame => frame.name() === 'tres');
   const items = await collectAllItems(frameTree, page);
+  console.log(`[STAGE] Items encontrados: ${items.length}`);
   const selected = await selectItemAndNavigate(frameTree, page, items, false);
   return selected ? selected.text : null;
 }
@@ -3651,12 +3708,38 @@ const delay = (time) => {
 
 
   // Obtener el frame con el nombre "tres"
-  let frameTree = page.frames().find(frame => frame.name() === 'tres');
+  let frameTree = null;
+  for (let attempt = 0; attempt < 10; attempt++) {
+    frameTree = page.frames().find(frame => frame.name() === 'tres');
+    if (frameTree) break;
+    console.log(`[STAGE] frame tres no disponible (intento ${attempt + 1}/10)`);
+    await delay(2000);
+  }
+  if (!frameTree) {
+    console.log('[STAGE] No se encontró el frame tres tras reintentos. Presione Enter para salir.');
+    await new Promise((resolve) => rl.question('', resolve));
+    await closeConnection();
+    rl.close();
+    browser.close();
+    return;
+  }
 
   if (frameTree) {
     
-    // Esperar a que los inputs dentro del frame estén cargados
-    await frameTree.waitForSelector('input');
+    // Esperar a que los inputs dentro del frame estén cargados (con reintentos:
+    // el login puede tardar en renderizar el formulario tras cargar el frame)
+    let inputsReady = false;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        await frameTree.waitForSelector('input', { timeout: 8000 });
+        inputsReady = true;
+        break;
+      } catch (e) {
+        console.log(`[STAGE] formulario login sin inputs (intento ${attempt + 1}/5)`);
+        await delay(2000);
+      }
+    }
+    if (!inputsReady) throw new Error('Formulario de login no disponible tras reintentos');
 
     // LOGIN.
     await frameTree.type('input[name="id_cliente"]', company);
@@ -3669,13 +3752,30 @@ const delay = (time) => {
     await navigateFrameRobust(page, async (ft) => {
       await ft.click('input[type="submit"]');
     }, (u) => u.includes('requerimientos.asp'), 20000);
+    await logStage(page, 'login');
 
     /////////////////////////////////////////////////////////
     // INGRESAR AL MENU INICIAL UNO Y HACER HOVER.
     /////////////////////////////////////////////////////////
-    const frameOne = page.frames().find(frame => frame.name() === 'uno');
-    // Esperar a que los inputs dentro del frame estén cargados
-    await frameOne.waitForSelector('div');
+    // El frame uno a veces carga DESPUÉS de que el login resuelve el URL del
+    // frame tres; reintentar en vez de fallar de inmediato.
+    let frameOne = null;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      frameOne = page.frames().find(frame => frame.name() === 'uno');
+      if (!frameOne) {
+        console.log(`[STAGE] frame uno no disponible (intento ${attempt + 1}/5)`);
+        await delay(2000);
+        continue;
+      }
+      try {
+        await frameOne.waitForSelector('div', { timeout: 8000 });
+        break;
+      } catch (e) {
+        console.log(`[STAGE] frame uno sin divs (intento ${attempt + 1}/5)`);
+        await delay(2000);
+      }
+    }
+    if (!frameOne) throw new Error('Frame uno no disponible tras reintentos');
     // Encontrar el div que contiene el texto específico usando evaluate
     const divHandle = await frameOne.evaluateHandle(() => {
       const elements = Array.from(document.querySelectorAll('div'));
@@ -3697,11 +3797,13 @@ const delay = (time) => {
       }, divHandle);
     }
     ////////////////////////--END--/////////////////////////
+    await logStage(page, 'hover Requerimientos');
 
     /////////////////////////////////////////////////////////
     // NAVEGAR A CONSULTAR.    
     /////////////////////////////////////////////////////////
-    // Esperar a que los inputs dentro del frame estén cargados
+    // Re-adquirir el frame tres (el hover pudo recrearlo) y esperar su menú
+    frameTree = page.frames().find(frame => frame.name() === 'tres');
     await frameTree.waitForSelector('div');
     // Encontrar el div que contiene el texto específico usando evaluate
     const divHandleConsulta = await frameTree.evaluateHandle(() => {
@@ -3716,6 +3818,7 @@ const delay = (time) => {
       }, (u) => u.includes('requerimientos.asp') && !u.includes('flag=resp'));
     }
     ////////////////////////--END--/////////////////////////
+    await logStage(page, 'consultar');
 
     /////////////////////////////////////////////////////////
     // ACTUALIZAR LA CONSULTA.
@@ -3751,19 +3854,27 @@ const delay = (time) => {
         el.dispatchEvent(new Event('change', { bubbles: true }));
       }, inputHandle, '01012000');
 
-      // Buscar el formulario
+      // Buscar el formulario. Usar click JS en vez de ft.click: el click real de
+      // Puppeteer sobre input[type="image"] no dispara el submit del form en
+      // modo headed (solo el click sintético lo activa).
       await navigateFrameRobust(page, async (ft) => {
-        await ft.click('input[type="image"]');
+        await ft.evaluate(() => {
+          const btn = document.querySelector('input[type="image"]');
+          if (btn) btn.click();
+        });
       }, (u) => u.includes('requerimientos.asp?flag=') && !u.includes('flag=resp'));
     }
     ////////////////////////--END--/////////////////////////
+    await logStage(page, 'búsqueda');
 
 
     /////////////////////////////////////////////////////////
     /**          SELECCIONAR SECCIÓN A REGISTRAR.         **/
     /////////////////////////////////////////////////////////
     frameTree = page.frames().find(frame => frame.name() === 'tres');
-    const links = await listElements(frameTree, 'a');
+    console.log('[STAGE] listando secciones...');
+    const links = await listElements(frameTree, 'a', 'itemsint.asp');
+    console.log(`[STAGE] Secciones encontradas: ${links.length}`);
     
     let useCachedPath = false;
     let selectedSectionText = null;
@@ -3795,6 +3906,16 @@ const delay = (time) => {
       if (linkHandle) await frameTree.evaluate(el => el.click(), linkHandle);
     } else {
       // Selección manual de sección
+      if (links.length === 0) {
+        console.log('[STAGE] No hay secciones para seleccionar. Estado del frame tres:');
+        await logStage(page, 'sin secciones');
+        console.log('Se cancela el registro. Presione Enter para salir.');
+        await new Promise((resolve) => rl.question('', resolve));
+        await closeConnection();
+        rl.close();
+        browser.close();
+        return;
+      }
       selectedSectionText = await whriteAndNavigateElementSelect(frameTree, 'a', links);
     }
     ////////////////////////--END--/////////////////////////
@@ -3803,6 +3924,7 @@ const delay = (time) => {
     /**  LISTAR Y NAVEGAR A REGISTRAR NUEVA TRANSACCIÓN.  **/
     /////////////////////////////////////////////////////////
     await navigateFrameRobust(page, null, (u) => u.includes('itemsint.asp'));
+    await logStage(page, 'sección seleccionada');
     
     if (useCachedPath) {
       // Navegar al item automáticamente (buscando en todas las páginas)
@@ -3823,6 +3945,7 @@ const delay = (time) => {
         useCachedPath = false;
       }
     } else {
+      console.log('[STAGE] listando items de la sección...');
       selectedItemText = await listAndNavigateNewTransaction(frameTree, page);
     }
     ////////////////////////--END--/////////////////////////
