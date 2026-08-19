@@ -29,12 +29,29 @@ const {
   smartTruncate,
   generateWithGemini
 } = require('./lib/summary.js');
+const { resolveRootDir } = require('./lib/path.js');
+const {
+  loadRegistrationsCache,
+  getCachedUser,
+  mergeDatesForUser,
+  getLastUsedHours,
+  saveHours,
+  loadPathCache,
+  savePathCache,
+  loadHolidays,
+  saveHolidays
+} = require('./lib/persistence.js');
+const {
+  getReposWithCache,
+  getGitAuthor,
+  getTodayCommits,
+  getRecentCommits,
+  getCommitsForDate,
+  getCommitsWithTime,
+  getRecentCommitsBeforeDate,
+  getRotatedCommits
+} = require('./lib/git.js');
 
-// Git para Windows rechaza repositorios WSL/UNC por "dubious ownership"
-// (archivos con otro dueño). Este flag desactiva esa protección por comando.
-// OJO: usar comillas dobles — cmd.exe (Windows) no interpreta las simples y
-// git recibiría ''*'' literal, lo que NO matchea ninguna excepción.
-const GIT_SAFE_DIR = '-c "safe.directory=*"';
 
 
 // Configurar readline para leer la entrada del usuario
@@ -52,61 +69,6 @@ const restoreReadline = () => {
   process.stdin.resume();
 };
 
-// Resolución de rutas WSL/Windows
-const resolveRootDir = (dir) => {
-  if (!dir) return dir;
-
-  const isWindows = process.platform === 'win32';
-
-  if (isWindows && dir.startsWith('/')) {
-    if (dir.startsWith('//')) return dir;
-
-    try {
-      const output = execSync('wsl -l -q', { encoding: 'utf-16le', stdio: ['pipe', 'pipe', 'pipe'] });
-      const distros = output.split('\n').map(d => d.replace(/\0/g, '').trim()).filter(Boolean);
-      for (const distro of distros) {
-        const uncBase = `//wsl.localhost/${distro}`;
-        const candidate = `${uncBase}${dir}`;
-        if (fs.existsSync(candidate)) {
-          console.log(`Ruta resuelta: ${dir} -> ${candidate}`);
-          return candidate;
-        }
-      }
-      console.log(`No se encontró distro WSL para la ruta: ${dir}`);
-      console.log(`Distros disponibles: ${distros.join(', ')}`);
-    } catch (err) {
-      console.log(`Error detectando distro WSL: ${err.message}`);
-    }
-    return dir;
-  }
-
-  if (!isWindows && dir.startsWith('//wsl.localhost')) {
-    const parts = dir.split('/').filter(p => p);
-    const linuxPath = '/' + parts.slice(2).join('/');
-    console.log(`Ruta resuelta: ${dir} -> ${linuxPath}`);
-    return linuxPath;
-  }
-
-  if (!isWindows && dir.startsWith('\\\\wsl.localhost')) {
-    const parts = dir.split('\\').filter(p => p);
-    const linuxPath = '/' + parts.slice(2).join('/');
-    console.log(`Ruta resuelta: ${dir} -> ${linuxPath}`);
-    return linuxPath;
-  }
-
-  return dir;
-};
-
-// Normaliza rutas UNC/Windows a su forma Linux para comparaciones
-const toLinuxPath = (p) => {
-  if (p.startsWith('//wsl.localhost')) {
-    return '/' + p.split('/').filter(Boolean).slice(2).join('/');
-  }
-  if (p.startsWith('\\\\wsl.localhost')) {
-    return '/' + p.split('\\').filter(Boolean).slice(2).join('/');
-  }
-  return p;
-};
 
 // Funciones auxiliares.
 
@@ -438,123 +400,7 @@ const selectJiraActivityMulti = async (activity) => {
 
 // Funciones de automatización basadas en commits
 
-const SKIP_DIRS = [
-  'node_modules', '.git', '.idea', '.vscode', '__pycache__', 'vendor',
-  '.svn', 'bower_components', 'dist', 'build', '.next', '.nuxt',
-  'payara5', 'inttegrio', 'bin', 'dmp', 'leadtools', '.atl', 'sdd'
-];
 
-const findGitRepos = (rootDir, depth = 0, maxDepth = 3) => {
-  const repos = [];
-  if (!rootDir || !fs.existsSync(rootDir)) {
-    console.log('ERROR: ROOT_DIR no existe o no está configurado.');
-    return repos;
-  }
-
-  if (depth > maxDepth) return repos;
-
-  try {
-    const items = fs.readdirSync(rootDir, { withFileTypes: true });
-
-    const hasGit = items.some(item => item.isDirectory() && item.name === '.git');
-    if (hasGit) {
-      repos.push(rootDir);
-    }
-
-    for (const item of items) {
-      if (!item.isDirectory()) continue;
-      if (item.name.startsWith('.') && item.name !== '.git') continue;
-      if (SKIP_DIRS.includes(item.name)) continue;
-
-      const fullPath = path.join(rootDir, item.name);
-      const subRepos = findGitRepos(fullPath, depth + 1, maxDepth);
-      repos.push(...subRepos);
-    }
-  } catch (err) {
-    console.log(`Error accediendo a ${rootDir}: ${err.message}`);
-  }
-  return repos;
-};
-
-const REPOS_FILE = path.join(__dirname, '.daybeat-repos.json');
-
-const loadRepoCache = () => {
-  try {
-    if (fs.existsSync(REPOS_FILE)) {
-      const data = JSON.parse(fs.readFileSync(REPOS_FILE, 'utf-8'));
-      const ageDays = (Date.now() - new Date(data.lastScan).getTime()) / (1000 * 60 * 60 * 24);
-      if (ageDays < 7) return data;
-    }
-  } catch (err) {}
-  return null;
-};
-
-const saveRepoCache = (repos, rootDir) => {
-  try {
-    fs.writeFileSync(REPOS_FILE, JSON.stringify({
-      rootDir,
-      lastScan: new Date().toISOString(),
-      repos
-    }, null, 2));
-  } catch (err) {}
-};
-
-// Caché por usuario de las fechas que ya tienen registro en Daybeat
-// (.daybeat-registrations.json). Evita re-recorrer todos los proyectos/items
-// (lento) en corridas repetidas de "Ver días sin registro" y "Registro masivo".
-const REGISTRATIONS_CACHE_FILE = path.join(__dirname, '.daybeat-registrations.json');
-
-
-const loadRegistrationsCache = () => {
-  try {
-    if (fs.existsSync(REGISTRATIONS_CACHE_FILE)) {
-      const data = JSON.parse(fs.readFileSync(REGISTRATIONS_CACHE_FILE, 'utf-8'));
-      if (data && typeof data === 'object') return data;
-    }
-  } catch (err) {}
-  return {};
-};
-
-const saveRegistrationsCache = (cache) => {
-  try {
-    fs.writeFileSync(REGISTRATIONS_CACHE_FILE, JSON.stringify(cache, null, 2));
-  } catch (err) {
-    console.log('No se pudo guardar la caché de registros.');
-  }
-};
-
-// Devuelve la entrada cacheada del usuario o null. `scannedFrom` es el inicio
-// de la ventana escaneada: si un período pedido arranca ANTES, la caché no lo
-// cubre y hay que re-escanear (evita marcar días viejos como faltantes).
-const getCachedUser = (cache, user) => {
-  if (!user) return null;
-  const entry = cache[user];
-  if (!entry || !Array.isArray(entry.dates)) return null;
-  return entry;
-};
-
-// Mergea fechas nuevas en la caché del usuario, amplía `scannedFrom` hacia el
-// pasado si hace falta y guarda el archivo.
-const mergeDatesForUser = (cache, user, newDates, scannedFrom) => {
-  if (!user) return cache;
-  const prev = cache[user] || { dates: [] };
-  const merged = new Set(prev.dates);
-  for (const d of newDates) merged.add(d);
-
-  let from = prev.scannedFrom || null;
-  if (from && scannedFrom && dateDDMMYYYYToTimestamp(scannedFrom) < dateDDMMYYYYToTimestamp(from)) {
-    from = scannedFrom;
-  }
-  if (!from) from = scannedFrom || null;
-
-  cache[user] = {
-    scannedFrom: from,
-    lastScan: new Date().toISOString(),
-    dates: [...merged]
-  };
-  saveRegistrationsCache(cache);
-  return cache;
-};
 
 // Menú de período compartido por "Ver días sin registro" y "Registro masivo".
 const askPeriod = (action) => {
@@ -581,263 +427,8 @@ const askPeriod = (action) => {
   });
 };
 
-const getReposWithCache = (rootDir, forceRescan = false) => {
-  if (!forceRescan) {
-    const cached = loadRepoCache();
-    if (cached && toLinuxPath(cached.rootDir) === toLinuxPath(rootDir)) {
-      const valid = cached.repos
-        .map(repo => resolveRootDir(repo))
-        .filter(r => fs.existsSync(r));
-      if (valid.length > 0) {
-        console.log(`Usando repositorios cacheados (${valid.length})`);
-        return valid;
-      }
-    }
-  }
-  console.log('Escaneando repositorios...');
-  const repos = findGitRepos(rootDir);
-  if (repos.length > 0) saveRepoCache(repos, rootDir);
-  return repos;
-};
-
-const getGitAuthor = (repos) => {
-  if (process.env.GIT_AUTHOR_EMAIL) {
-    return process.env.GIT_AUTHOR_EMAIL;
-  }
-  
-  for (const repo of repos) {
-    try {
-      const email = execSync(`git ${GIT_SAFE_DIR} -C "${repo}" config user.email`, {
-        encoding: 'utf-8',
-        stdio: ['pipe', 'pipe', 'pipe']
-      }).trim();
-      if (email) return email;
-    } catch (err) {
-      continue;
-    }
-  }
-  
-  return null;
-};
-
-const getTodayCommits = (repoPath, author = null) => {
-  try {
-    const today = new Date();
-    const year = today.getFullYear();
-    const month = String(today.getMonth() + 1).padStart(2, '0');
-    const day = String(today.getDate()).padStart(2, '0');
-    const dateStr = `${year}-${month}-${day} 00:00:00`;
-    
-    const authorFilter = author ? `--author="${author}"` : '';
-    const result = execSync(
-      `git ${GIT_SAFE_DIR} -C "${repoPath}" log --since="${dateStr}" --all ${authorFilter} --format="%s"`,
-      { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }
-    );
-    const commits = result.trim().split('\n').filter(msg => msg.length > 0);
-    console.log(`  ${repoPath}: ${commits.length} commits hoy (${dateStr})`);
-    return commits;
-  } catch (err) {
-    console.log(`  ${repoPath}: Error al obtener commits de hoy`);
-    return [];
-  }
-};
-
-const getRecentCommits = (repoPath, days = 7, author = null) => {
-  try {
-    const today = new Date();
-    const pastDate = new Date(today.getTime() - (days * 24 * 60 * 60 * 1000));
-    const year = pastDate.getFullYear();
-    const month = String(pastDate.getMonth() + 1).padStart(2, '0');
-    const day = String(pastDate.getDate()).padStart(2, '0');
-    const dateStr = `${year}-${month}-${day} 00:00:00`;
-    
-    const authorFilter = author ? `--author="${author}"` : '';
-    const result = execSync(
-      `git ${GIT_SAFE_DIR} -C "${repoPath}" log --since="${dateStr}" --all ${authorFilter} --format="%s"`,
-      { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }
-    );
-    const commits = result.trim().split('\n').filter(msg => msg.length > 0);
-    console.log(`  ${repoPath}: ${commits.length} commits encontrados (${dateStr})`);
-    return commits;
-  } catch (err) {
-    console.log(`  ${repoPath}: Error al obtener commits`);
-    return [];
-  }
-};
-
-const getCommitsForDate = (repoPath, dateStr, author = null) => {
-  try {
-    const [day, month, year] = dateStr.split('/');
-    const targetDate = `${year}-${month}-${day}`;
-    // Hora LOCAL (new Date('YYYY-MM-DD') parsea UTC y rompe el +1 día en UTC-x)
-    const nextDate = new Date(year, month - 1, day);
-    nextDate.setDate(nextDate.getDate() + 1);
-    const nextDateStr = `${nextDate.getFullYear()}-${String(nextDate.getMonth() + 1).padStart(2, '0')}-${String(nextDate.getDate()).padStart(2, '0')}`;
-    
-    const authorFilter = author ? `--author="${author}"` : '';
-    const result = execSync(
-      `git ${GIT_SAFE_DIR} -C "${repoPath}" log --since="${targetDate} 00:00:00" --until="${nextDateStr} 00:00:00" --all ${authorFilter} --format="%s"`,
-      { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }
-    );
-    const commits = result.trim().split('\n').filter(msg => msg.length > 0);
-    console.log(`  ${repoPath}: ${commits.length} commits (${targetDate})`);
-    return commits;
-  } catch (err) {
-    return [];
-  }
-};
-
-// Commits de una fecha específica CON la hora del commit (formato HH:MM local).
-// Se usa solo para armar los bloques del día (registro multi-bloque).
-const getCommitsWithTime = (repoPath, dateStr, author = null) => {
-  try {
-    const [day, month, year] = dateStr.split('/');
-    const targetDate = `${year}-${month}-${day}`;
-    // Construir en hora LOCAL (new Date('YYYY-MM-DD') parsea en UTC y en
-    // zonas UTC-x el setDate(+1) cae en el mismo día calendario).
-    const nextDate = new Date(year, month - 1, day);
-    nextDate.setDate(nextDate.getDate() + 1);
-    const nextDateStr = `${nextDate.getFullYear()}-${String(nextDate.getMonth() + 1).padStart(2, '0')}-${String(nextDate.getDate()).padStart(2, '0')}`;
-
-    const authorFilter = author ? `--author="${author}"` : '';
-    const result = execSync(
-      `git ${GIT_SAFE_DIR} -C "${repoPath}" log --since="${targetDate} 00:00:00" --until="${nextDateStr} 00:00:00" --all ${authorFilter} --format="%s|%ai"`,
-      { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }
-    );
-    return result.trim().split('\n').filter(line => line.length > 0).map(line => {
-      const [message, iso] = line.split('|');
-      const time = iso ? iso.substring(11, 16) : null; // HH:MM (hora local del autor)
-      return { message, time };
-    }).filter(c => c.time);
-  } catch (err) {
-    return [];
-  }
-};
 
 
-const getRecentCommitsBeforeDate = (repoPath, dateStr, days = 5, author = null) => {
-  try {
-    const [day, month, year] = dateStr.split('/');
-    // Hora LOCAL (new Date('YYYY-MM-DD') parsea UTC y rompe el cálculo en UTC-x)
-    const targetDate = new Date(year, month - 1, day);
-    const pastDate = new Date(targetDate.getTime() - (days * 24 * 60 * 60 * 1000));
-    const pastDateStr = `${pastDate.getFullYear()}-${String(pastDate.getMonth() + 1).padStart(2, '0')}-${String(pastDate.getDate()).padStart(2, '0')}`;
-    const targetDateStr = `${year}-${month}-${day}`;
-    
-    const authorFilter = author ? `--author="${author}"` : '';
-    const result = execSync(
-      `git ${GIT_SAFE_DIR} -C "${repoPath}" log --since="${pastDateStr} 00:00:00" --until="${targetDateStr} 00:00:00" --all ${authorFilter} --format="%s|%ad" --date=short`,
-      { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }
-    );
-    const commits = result.trim().split('\n').filter(msg => msg.length > 0).map(line => {
-      const [message, date] = line.split('|');
-      return { message, date };
-    });
-    console.log(`  ${repoPath}: ${commits.length} commits (${pastDateStr} a ${targetDateStr})`);
-    return commits;
-  } catch (err) {
-    return [];
-  }
-};
-
-const getRotatedCommits = (commitsWithDates, targetDateStr) => {
-  if (commitsWithDates.length === 0) return [];
-  
-  const [day, month, year] = targetDateStr.split('/');
-  const targetDate = new Date(`${year}-${month}-${day}`);
-  const dayOfWeek = targetDate.getDay();
-  
-  const sortedCommits = [...commitsWithDates].sort((a, b) => {
-    const dateA = new Date(a.date);
-    const dateB = new Date(b.date);
-    return dateB - dateA;
-  });
-  
-  const uniqueDates = [...new Set(sortedCommits.map(c => c.date))];
-  
-  let selectedDate;
-  switch (dayOfWeek) {
-    case 1: selectedDate = uniqueDates[0]; break;
-    case 2: selectedDate = uniqueDates[1] || uniqueDates[0]; break;
-    case 3: selectedDate = uniqueDates[2] || uniqueDates[1] || uniqueDates[0]; break;
-    case 4:
-      const date1 = uniqueDates[0];
-      const date2 = uniqueDates[1] || uniqueDates[0];
-      return sortedCommits.filter(c => c.date === date1 || c.date === date2).map(c => c.message);
-    case 5: selectedDate = uniqueDates[0]; break;
-    default: selectedDate = uniqueDates[0]; break;
-  }
-  
-  return sortedCommits.filter(c => c.date === selectedDate).map(c => c.message);
-};
-
-
-const HISTORY_FILE = path.join(__dirname, '.daybeat-history.json');
-
-const getLastUsedHours = () => {
-  try {
-    if (fs.existsSync(HISTORY_FILE)) {
-      const data = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf-8'));
-      return { start: data.startTime || '0730', end: data.endTime || '1630' };
-    }
-  } catch (err) {
-    // Si hay error, usar defaults
-  }
-  return { start: '0730', end: '1630' };
-};
-
-const saveHours = (startTime, endTime) => {
-  try {
-    fs.writeFileSync(HISTORY_FILE, JSON.stringify({ startTime, endTime }, null, 2));
-  } catch (err) {
-    console.log('No se pudo guardar el horario.');
-  }
-};
-
-const PATH_CACHE_FILE = path.join(__dirname, '.daybeat-path.json');
-
-const loadPathCache = () => {
-  try {
-    if (fs.existsSync(PATH_CACHE_FILE)) {
-      const data = JSON.parse(fs.readFileSync(PATH_CACHE_FILE, 'utf-8'));
-      if (data.section?.text && data.item?.text && data.category?.value && data.transactionType?.value) {
-        return data;
-      }
-    }
-  } catch (err) {}
-  return null;
-};
-
-const savePathCache = (pathData) => {
-  try {
-    fs.writeFileSync(PATH_CACHE_FILE, JSON.stringify(pathData, null, 2));
-  } catch (err) {
-    console.log('No se pudo guardar la ruta de registro.');
-  }
-};
-
-
-const HOLIDAYS_FILE = path.join(__dirname, 'holidays.json');
-
-const loadHolidays = () => {
-  try {
-    if (fs.existsSync(HOLIDAYS_FILE)) {
-      const data = JSON.parse(fs.readFileSync(HOLIDAYS_FILE, 'utf-8'));
-      if (data.year && data.holidays) {
-        return { year: data.year, holidays: data.holidays };
-      }
-    }
-  } catch (err) {}
-  return { year: null, holidays: [] };
-};
-
-const saveHolidays = (year, holidays) => {
-  try {
-    fs.writeFileSync(HOLIDAYS_FILE, JSON.stringify({ year, holidays }, null, 2));
-  } catch (err) {
-    console.log('No se pudo guardar el archivo de festivos.');
-  }
-};
 
 const checkHolidaysYear = async () => {
   const currentYear = new Date().getFullYear();
