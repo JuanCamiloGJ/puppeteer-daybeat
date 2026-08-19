@@ -376,7 +376,7 @@ const selectJiraActivityMulti = async (activity) => {
     activity.comments.slice(0, 15).forEach((comment, i) => {
       const time = comment.created ? ` (${comment.created.substring(0, 16).replace('T', ' ')})` : '';
       choices.push({
-        name: `${comment.issueKey}: "${comment.body}"${time}`,
+        name: `${comment.issueKey}: "${smartTruncate(comment.body, 150)}"${time}`,
         value: { kind: 'comment', i }
       });
     });
@@ -385,7 +385,7 @@ const selectJiraActivityMulti = async (activity) => {
     choices.push(new Separator('-- Worklogs --'));
     activity.worklogs.slice(0, 15).forEach((worklog, i) => {
       choices.push({
-        name: `${worklog.issueKey}: ${worklog.timeSpent}${worklog.comment ? ` — "${worklog.comment}"` : ''}`,
+        name: `${worklog.issueKey}: ${worklog.timeSpent}${worklog.comment ? ` — "${smartTruncate(worklog.comment, 150)}"` : ''}`,
         value: { kind: 'worklog', i }
       });
     });
