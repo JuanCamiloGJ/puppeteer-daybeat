@@ -157,10 +157,11 @@ const collectAllItems = async (frameTree, page) => {
     });
 
     if (!nextHref) break;
-    await frameTree.evaluate((href) => {
-      window.location.href = href;
-    }, nextHref);
-    await frameTree.waitForNavigation();
+    await navigateFrameRobust(page, async (ft) => {
+      await ft.evaluate((href) => {
+        window.location.href = href;
+      }, nextHref);
+    }, (u) => u.includes(`page=${i + 1}`));
     await delay(1500);
   }
   return items;
@@ -187,11 +188,44 @@ const selectItemAndNavigate = async (frameTree, page, items, navigateToDetail = 
 
   const selected = items[index];
   const target = navigateToDetail ? selected.href : selected.createHref;
-  await frameTree.evaluate((href) => {
-    window.location.href = href;
-  }, target);
-  await frameTree.waitForNavigation();
+  await navigateFrameRobust(page, async (ft) => {
+    await ft.evaluate((href) => {
+      window.location.href = href;
+    }, target);
+  }, (u) => u.includes(navigateToDetail ? 'itemsint_actualizar.asp' : 'transaccionesint_crear.asp'));
   return selected;
+}
+
+// Navegación robusta de un frame. El patrón clásico `click(); waitForNavigation();`
+// es frágil en LAN rápida: la página carga tan rápido que el evento de navegación
+// se pierde y waitForNavigation cae en TimeoutError (o el frame se desmonta y
+// la promesa nunca resuelve). Este helper se suscribe ANTES de disparar la
+// navegación y, como respaldo, sondea el URL del frame hasta que cumple el
+// predicado esperado (independiente de eventos de navegación).
+// `triggerFn` puede ser null si la navegación ya fue disparada (solo sondea).
+const navigateFrameRobust = async (page, triggerFn, urlPredicate, timeoutMs = 20000) => {
+  if (triggerFn) {
+    const frameTree = page.frames().find(frame => frame.name() === 'tres');
+    try {
+      await Promise.all([
+        frameTree.waitForNavigation({ timeout: 10000 }),
+        triggerFn(frameTree)
+      ]);
+    } catch (err) {
+      // Race (nav demasiado rápida) o frame desmontado: el sondeo de respaldo
+      // debajo resuelve igual; aquí no es un error real.
+    }
+  }
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const f = page.frames().find(frame => frame.name() === 'tres');
+    if (f) {
+      const url = await f.evaluate(() => window.location.href).catch(() => '');
+      if (url && urlPredicate(url)) return f;
+    }
+    await delay(250);
+  }
+  throw new Error(`navigateFrameRobust: timeout esperando la navegación (${timeoutMs}ms)`);
 }
 
 const normalizeText = (s) => s ? s.replace(/\s+/g, ' ').trim() : '';
@@ -1397,7 +1431,7 @@ const extractRegistrations = async (frameTree, startDate = null, currentUser = n
         await frameTree.evaluate((href) => {
           window.location.href = href;
         }, nextPageLink.href);
-        await frameTree.waitForNavigation();
+        await navigateFrameRobust(page, null, (u) => /page_trans=[1-9]\d*/.test(u));
         await delay(1500);
         currentPage++;
       } else {
@@ -1499,8 +1533,9 @@ const getExistingRanges = async (frameTree, page, dateStr, currentUser = null, c
     const detailUrl = formUrl.replace('transaccionesint_crear.asp', 'itemsint_actualizar.asp');
     if (detailUrl === formUrl) return null; // no es el formulario de creación
 
-    await frameTree.evaluate((href) => { window.location.href = href; }, detailUrl);
-    await frameTree.waitForNavigation();
+    await navigateFrameRobust(page, async (ft) => {
+      await ft.evaluate((href) => { window.location.href = href; }, detailUrl);
+    }, (u) => u.includes('itemsint_actualizar.asp'));
     await delay(1200);
     frameTree = page.frames().find(frame => frame.name() === 'tres');
     if (!frameTree) return null;
@@ -1511,8 +1546,9 @@ const getExistingRanges = async (frameTree, page, dateStr, currentUser = null, c
     const rows = await parseTransactionTable(frameTree, targetDate, currentUser);
 
     // Volver al formulario de creación
-    await frameTree.evaluate((href) => { window.location.href = href; }, formUrl);
-    await frameTree.waitForNavigation();
+    await navigateFrameRobust(page, async (ft) => {
+      await ft.evaluate((href) => { window.location.href = href; }, formUrl);
+    }, (u) => u.includes('transaccionesint_crear.asp'));
     await delay(1500);
     frameTree = page.frames().find(frame => frame.name() === 'tres');
     if (!frameTree) return null;
@@ -1674,8 +1710,9 @@ const showMissingRegistrations = async (page, browser, company, usernameDaybeat,
   await frameTree.type('input[name="password"]', password);
   
   await delay(1000);
-  await frameTree.click('input[type="submit"]');
-  await frameTree.waitForNavigation();
+  await navigateFrameRobust(page, async (ft) => {
+    await ft.click('input[type="submit"]');
+  }, (u) => u.includes('requerimientos.asp'), 20000);
   
   console.log('Login completado, esperando carga de página...');
   await delay(3000);
@@ -1721,8 +1758,9 @@ const showMissingRegistrations = async (page, browser, company, usernameDaybeat,
   });
   
   if (divHandleConsulta) {
-    await frameTree.evaluate(el => el.click(), divHandleConsulta);
-    await frameTree.waitForNavigation();
+    await navigateFrameRobust(page, async (ft) => {
+      await ft.evaluate(el => el.click(), divHandleConsulta);
+    }, (u) => u.includes('requerimientos.asp') && !u.includes('flag=resp'));
   }
   
   frameTree = page.frames().find(frame => frame.name() === 'tres');
@@ -1758,7 +1796,7 @@ const showMissingRegistrations = async (page, browser, company, usernameDaybeat,
     await frameTree.evaluate((href) => {
       window.location.href = href;
     }, project.href);
-    await frameTree.waitForNavigation();
+    await navigateFrameRobust(page, null, (u) => u.includes('itemsint.asp'));
     await delay(1500);
     
     // Guardar URL de items para volver
@@ -1774,11 +1812,11 @@ const showMissingRegistrations = async (page, browser, company, usernameDaybeat,
       console.log(`    Procesando item: ${item.text}`);
       
       // Navegar al item
-      await frameTree.evaluate((href) => {
-        window.location.href = href;
-      }, item.href);
-      await frameTree.waitForNavigation();
-      await delay(1500);
+    await frameTree.evaluate((href) => {
+      window.location.href = href;
+    }, item.href);
+    await navigateFrameRobust(page, null, (u) => u.includes('itemsint_actualizar.asp'));
+    await delay(1500);
       
       // Extraer fechas de las transacciones (con paginación limitada al rango y filtrado por usuario)
       const dates = await extractRegistrations(frameTree, startDateStr, currentUser);
@@ -1789,7 +1827,7 @@ const showMissingRegistrations = async (page, browser, company, usernameDaybeat,
       await frameTree.evaluate((href) => {
         window.location.href = href;
       }, itemsUrl);
-      await frameTree.waitForNavigation();
+      await navigateFrameRobust(page, null, (u) => u.includes('itemsint.asp'));
       await delay(1000);
     }
     
@@ -1797,7 +1835,7 @@ const showMissingRegistrations = async (page, browser, company, usernameDaybeat,
     await frameTree.evaluate((href) => {
       window.location.href = href;
     }, consultaUrl);
-    await frameTree.waitForNavigation();
+    await navigateFrameRobust(page, null, (u) => u.includes('requerimientos.asp'));
     await delay(1000);
   }
   
@@ -1869,8 +1907,9 @@ const registerBulkMissingDays = async (page, browser, company, usernameDaybeat, 
   await frameTree.type('input[name="password"]', password);
   
   await delay(1000);
-  await frameTree.click('input[type="submit"]');
-  await frameTree.waitForNavigation();
+  await navigateFrameRobust(page, async (ft) => {
+    await ft.click('input[type="submit"]');
+  }, (u) => u.includes('requerimientos.asp'), 20000);
   
   console.log('Login completado, esperando carga de página...');
   await delay(3000);
@@ -1916,8 +1955,9 @@ const registerBulkMissingDays = async (page, browser, company, usernameDaybeat, 
   });
   
   if (divHandleConsulta) {
-    await frameTree.evaluate(el => el.click(), divHandleConsulta);
-    await frameTree.waitForNavigation();
+    await navigateFrameRobust(page, async (ft) => {
+      await ft.evaluate(el => el.click(), divHandleConsulta);
+    }, (u) => u.includes('requerimientos.asp') && !u.includes('flag=resp'));
   }
   
   frameTree = page.frames().find(frame => frame.name() === 'tres');
@@ -1949,7 +1989,7 @@ const registerBulkMissingDays = async (page, browser, company, usernameDaybeat, 
     await frameTree.evaluate((href) => {
       window.location.href = href;
     }, project.href);
-    await frameTree.waitForNavigation();
+    await navigateFrameRobust(page, null, (u) => u.includes('itemsint.asp'));
     await delay(1500);
     
     const itemsUrl = await frameTree.evaluate(() => window.location.href);
@@ -1961,11 +2001,11 @@ const registerBulkMissingDays = async (page, browser, company, usernameDaybeat, 
     for (const item of items) {
       console.log(`    Procesando item: ${item.text}`);
       
-      await frameTree.evaluate((href) => {
-        window.location.href = href;
-      }, item.href);
-      await frameTree.waitForNavigation();
-      await delay(1500);
+    await frameTree.evaluate((href) => {
+      window.location.href = href;
+    }, item.href);
+    await navigateFrameRobust(page, null, (u) => u.includes('itemsint_actualizar.asp'));
+    await delay(1500);
       
       const dates = await extractRegistrations(frameTree, startDateStr, currentUser);
       console.log(`    Transacciones encontradas: ${dates.length}`);
@@ -1977,14 +2017,14 @@ const registerBulkMissingDays = async (page, browser, company, usernameDaybeat, 
       await frameTree.evaluate((href) => {
         window.location.href = href;
       }, itemsUrl);
-      await frameTree.waitForNavigation();
+      await navigateFrameRobust(page, null, (u) => u.includes('itemsint.asp'));
       await delay(1000);
     }
     
     await frameTree.evaluate((href) => {
       window.location.href = href;
     }, itemsUrl);
-    await frameTree.waitForNavigation();
+    await navigateFrameRobust(page, null, (u) => u.includes('itemsint.asp'));
     await delay(1000);
   }
   
@@ -2019,7 +2059,7 @@ const registerBulkMissingDays = async (page, browser, company, usernameDaybeat, 
   await frameTree.evaluate((href) => {
     window.location.href = href;
   }, consultaUrl);
-  await frameTree.waitForNavigation();
+  await navigateFrameRobust(page, null, (u) => u.includes('requerimientos.asp'));
   await delay(1500);
   
   frameTree = page.frames().find(frame => frame.name() === 'tres');
@@ -2043,7 +2083,7 @@ const registerBulkMissingDays = async (page, browser, company, usernameDaybeat, 
   await frameTree.evaluate((href) => {
     window.location.href = href;
   }, selectedSection.href);
-  await frameTree.waitForNavigation();
+  await navigateFrameRobust(page, null, (u) => u.includes('itemsint.asp'));
   await delay(1500);
   
   frameTree = page.frames().find(frame => frame.name() === 'tres');
@@ -2276,7 +2316,7 @@ const registerBulkMissingDays = async (page, browser, company, usernameDaybeat, 
       await frameTree.evaluate((href) => {
         window.location.href = href;
       }, itemUrl);
-      await frameTree.waitForNavigation();
+      await navigateFrameRobust(page, null, (u) => u.includes('transaccionesint_crear.asp'));
       await delay(1500);
       
       frameTree = page.frames().find(frame => frame.name() === 'tres');
@@ -2409,8 +2449,9 @@ const readTransactionForm = async (frameTree) => {
 const updateTransaction = async (frameTree, page, updateHref = null, fields = {}) => {
   try {
     if (updateHref) {
-      await frameTree.evaluate((href) => { window.location.href = href; }, updateHref);
-      await frameTree.waitForNavigation();
+      await navigateFrameRobust(page, async (ft) => {
+        await ft.evaluate((href) => { window.location.href = href; }, updateHref);
+      }, (u) => u.includes('transaccionesint_actualizar.asp'));
       await delay(1200);
     }
     frameTree = page.frames().find(frame => frame.name() === 'tres');
@@ -2493,8 +2534,9 @@ const correctRegistration = async (page, browser, company, usernameDaybeat, pass
   await frameTree.type('input[name="login"]', usernameDaybeat);
   await frameTree.type('input[name="password"]', password);
   await delay(1000);
-  await frameTree.click('input[type="submit"]');
-  await frameTree.waitForNavigation();
+  await navigateFrameRobust(page, async (ft) => {
+    await ft.click('input[type="submit"]');
+  }, (u) => u.includes('requerimientos.asp'), 20000);
 
   console.log('Login completado, esperando carga de página...');
   await delay(3000);
@@ -2534,8 +2576,9 @@ const correctRegistration = async (page, browser, company, usernameDaybeat, pass
     return elements.find(el => el.textContent.trim() === 'Consultar');
   });
   if (divHandleConsulta) {
-    await frameTree.evaluate(el => el.click(), divHandleConsulta);
-    await frameTree.waitForNavigation();
+    await navigateFrameRobust(page, async (ft) => {
+      await ft.evaluate(el => el.click(), divHandleConsulta);
+    }, (u) => u.includes('requerimientos.asp') && !u.includes('flag=resp'));
   }
 
   // Mostrar todos los requerimientos (desde 01/01/2000)
@@ -2549,8 +2592,9 @@ const correctRegistration = async (page, browser, company, usernameDaybeat, pass
       el.dispatchEvent(new Event('input', { bubbles: true }));
       el.dispatchEvent(new Event('change', { bubbles: true }));
     }, inputHandle, '01012000');
-    await frameTree.click('input[type="image"]');
-    await frameTree.waitForNavigation();
+    await navigateFrameRobust(page, async (ft) => {
+      await ft.click('input[type="image"]');
+    }, (u) => u.includes('requerimientos.asp?flag=') && !u.includes('flag=resp'));
   }
 
   // Seleccionar sección (reusando la ruta cacheada si existe)
@@ -2581,7 +2625,7 @@ const correctRegistration = async (page, browser, company, usernameDaybeat, pass
   } else {
     await whriteAndNavigateElementSelect(frameTree, 'a', links);
   }
-  await frameTree.waitForNavigation();
+  await navigateFrameRobust(page, null, (u) => u.includes('itemsint.asp'));
 
   // Seleccionar item: el link con el texto del item es el detalle
   // (itemsint_actualizar.asp), no el formulario de creación.
@@ -2590,10 +2634,11 @@ const correctRegistration = async (page, browser, company, usernameDaybeat, pass
   if (useCachedPath) {
     const itemIdx = otherLinks.findIndex(l => normalizeText(l.text) === normalizeText(cachedPath.item.text));
     if (itemIdx >= 0) {
-      await frameTree.evaluate((href) => {
-        window.location.href = href;
-      }, otherLinks[itemIdx].href);
-      await frameTree.waitForNavigation();
+      await navigateFrameRobust(page, async (ft) => {
+        await ft.evaluate((href) => {
+          window.location.href = href;
+        }, otherLinks[itemIdx].href);
+      }, (u) => u.includes('itemsint_actualizar.asp'));
     } else {
       console.log('\nEl item anterior ya no existe. Seleccione manualmente.');
       await selectItemAndNavigate(frameTree, page, otherLinks, true);
@@ -2616,7 +2661,7 @@ const correctRegistration = async (page, browser, company, usernameDaybeat, pass
 
     // Re-navegar al detalle para refrescar la tabla
     await frameTree.evaluate((href) => { window.location.href = href; }, itemDetailUrl);
-    await frameTree.waitForNavigation();
+    await navigateFrameRobust(page, null, (u) => u.includes('itemsint_actualizar.asp'));
     await delay(1200);
     frameTree = page.frames().find(frame => frame.name() === 'tres');
     if (!frameTree) break;
@@ -2649,7 +2694,7 @@ const correctRegistration = async (page, browser, company, usernameDaybeat, pass
 
     // Navegar al formulario de actualización y leer el estado actual
     await frameTree.evaluate((href) => { window.location.href = href; }, row.updateHref);
-    await frameTree.waitForNavigation();
+    await navigateFrameRobust(page, null, (u) => u.includes('transaccionesint_actualizar.asp'));
     await delay(1200);
     frameTree = page.frames().find(frame => frame.name() === 'tres');
     if (!frameTree) break;
@@ -3340,7 +3385,7 @@ const registerNewTransaction = async (frameTree, page, autoData = null, cachedCa
         await frameTree.evaluate((href) => {
           window.location.href = href;
         }, formUrl);
-        await frameTree.waitForNavigation();
+        await navigateFrameRobust(page, null, (u) => u.includes('transaccionesint_crear.asp'));
         await delay(1500);
         frameTree = page.frames().find(frame => frame.name() === 'tres');
         await frameTree.waitForSelector('select');
@@ -3621,10 +3666,9 @@ const delay = (time) => {
     await delay(1000)
 
     // Enviar el formulario.
-    await frameTree.click('input[type="submit"]');
-
-    // Esperar a que la navegación termine (si redirige a otra página).
-    await frameTree.waitForNavigation();
+    await navigateFrameRobust(page, async (ft) => {
+      await ft.click('input[type="submit"]');
+    }, (u) => u.includes('requerimientos.asp'), 20000);
 
     /////////////////////////////////////////////////////////
     // INGRESAR AL MENU INICIAL UNO Y HACER HOVER.
@@ -3667,9 +3711,9 @@ const delay = (time) => {
 
     if (divHandleConsulta) {
       // Hacer clic en el div encontrado
-      await frameTree.evaluate(el => el.click(), divHandleConsulta);
-      // Esperar a que la navegación termine (si redirige a otra página).
-      await frameTree.waitForNavigation();
+      await navigateFrameRobust(page, async (ft) => {
+        await ft.evaluate(el => el.click(), divHandleConsulta);
+      }, (u) => u.includes('requerimientos.asp') && !u.includes('flag=resp'));
     }
     ////////////////////////--END--/////////////////////////
 
@@ -3708,10 +3752,9 @@ const delay = (time) => {
       }, inputHandle, '01012000');
 
       // Buscar el formulario
-      await frameTree.click('input[type="image"]');
-
-      // Esperar a que la navegación termine (si redirige a otra página).
-      await frameTree.waitForNavigation();
+      await navigateFrameRobust(page, async (ft) => {
+        await ft.click('input[type="image"]');
+      }, (u) => u.includes('requerimientos.asp?flag=') && !u.includes('flag=resp'));
     }
     ////////////////////////--END--/////////////////////////
 
@@ -3759,7 +3802,7 @@ const delay = (time) => {
     /////////////////////////////////////////////////////////
     /**  LISTAR Y NAVEGAR A REGISTRAR NUEVA TRANSACCIÓN.  **/
     /////////////////////////////////////////////////////////
-    await frameTree.waitForNavigation();
+    await navigateFrameRobust(page, null, (u) => u.includes('itemsint.asp'));
     
     if (useCachedPath) {
       // Navegar al item automáticamente (buscando en todas las páginas)
@@ -3768,10 +3811,11 @@ const delay = (time) => {
       const itemIdx = otherLinks.findIndex(l => normalizeText(l.text) === normalizeText(cachedPath.item.text));
       if (itemIdx >= 0) {
         const selectedItem = otherLinks[itemIdx];
-        await frameTree.evaluate((href) => {
-          window.location.href = href;
-        }, selectedItem.createHref);
-        await frameTree.waitForNavigation();
+        await navigateFrameRobust(page, async (ft) => {
+          await ft.evaluate((href) => {
+            window.location.href = href;
+          }, selectedItem.createHref);
+        }, (u) => u.includes('transaccionesint_crear.asp'));
       } else {
         console.log('\nEl item anterior ya no existe. Seleccione manualmente.');
         const selected = await selectItemAndNavigate(frameTree, page, otherLinks, false);
