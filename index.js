@@ -22,6 +22,7 @@ const { closeConnection } = require('./lib/jira-report.js');
 // Funciones de lib/daybeat.js usadas en el composition root (login y menú).
 const {
   delay,
+  findElementHandle,
   navigateFrameRobust,
   logStage,
   listElements,
@@ -190,7 +191,7 @@ const {
     }
     if (!frameOne) throw new Error('Frame uno no disponible tras reintentos');
     // Encontrar el div que contiene el texto específico usando evaluate
-    const divHandle = await frameOne.evaluateHandle(() => {
+    const divHandle = await findElementHandle(frameOne, () => {
       const elements = Array.from(document.querySelectorAll('div'));
       return elements.find(el => el.textContent.trim() === 'Requerimientos'); // Comparación exacta
     });
@@ -208,6 +209,8 @@ const {
         });
         el.dispatchEvent(event);
       }, divHandle);
+    } else {
+      console.log('[WARN] Menú "Requerimientos" no encontrado en el frame uno; se omite el hover.');
     }
     ////////////////////////--END--/////////////////////////
     await logStage(page, 'hover Requerimientos');
@@ -219,7 +222,7 @@ const {
     frameTree = page.frames().find(frame => frame.name() === 'tres');
     await frameTree.waitForSelector('div');
     // Encontrar el div que contiene el texto específico usando evaluate
-    const divHandleConsulta = await frameTree.evaluateHandle(() => {
+    const divHandleConsulta = await findElementHandle(frameTree, () => {
       const elements = Array.from(document.querySelectorAll('div'));
       return elements.find(el => el.textContent.trim() === 'Consultar'); // Comparación exacta
     });
@@ -229,6 +232,8 @@ const {
       await navigateFrameRobust(page, async (ft) => {
         await ft.evaluate(el => el.click(), divHandleConsulta);
       }, (u) => u.includes('requerimientos.asp') && !u.includes('flag=resp'));
+    } else {
+      console.log('[WARN] Menú "Consultar" no encontrado en el frame tres; se omite la navegación.');
     }
     ////////////////////////--END--/////////////////////////
     await logStage(page, 'consultar');
@@ -311,7 +316,7 @@ const {
       // Seleccionar sección automáticamente
       const foundIdx = links.findIndex(l => l.text === cachedPath.section.text);
       const selectedLink = links[foundIdx];
-      const linkHandle = await frameTree.evaluateHandle((text, selector) => {
+      const linkHandle = await findElementHandle(frameTree, (text, selector) => {
         const elements = Array.from(document.querySelectorAll(selector));
         return elements.find(el => el.textContent.trim() === text);
       }, selectedLink.text, 'a');
