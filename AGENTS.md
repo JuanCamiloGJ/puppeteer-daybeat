@@ -10,7 +10,7 @@ Single-file Node.js Puppeteer script that automates daily task/time registration
 - **Install:** `npm install`
 - **Rescan repos:** `node index.js --rescan` or `node diagnostic-commits.js --rescan`
 - **Test Jira integration:** `node test-jira.js` (optionally with a date arg `DD/MM/YYYY`)
-- No tests, lint, typecheck, or build steps exist.
+- **Tests:** `npm test` (`node --test lib/*.test.js`) — 41 tests: unit (time/summary/git), smoke (carga de módulos) y un harness E2E del flujo de registro con frames mockeados (`lib/register-flow.e2e.test.js`). Sin lint ni typecheck.
 
 ## Environment
 
@@ -193,3 +193,13 @@ Reusable pieces:
 Notes:
 - If the new date/time overlaps another transaction, Daybeat rejects with a "traslapa" alert: reported and the user can retry.
 - `parseTransactionTable` reads page 1 of the transactions table (like `getExistingRanges`); the target date is usually the first row (descending order).
+
+## Lección: frames obsoletos tras navegar dentro del flujo (bug "nunca termina")
+
+Bug real (usuario jcarvajal): tras confirmar "sí" en el registro con Jira, el script quedaba "nunca termina" y el formulario mostraba texto residual (`ée`, `ééo ééo`). Causas y la regla que hay que respetar:
+
+1. **Los objetos Frame de Puppeteer se recrean en cada navegación del iframe.** `getExistingRanges` navega frame tres (formulario → detalle → formulario). El `frameTree` que tenía el caller queda OBSOLETO. Escribir sobre él falla en silencio. **Regla: tras cualquier función que navegue un frame dentro del flujo, re-adquirir el frame** (`frameTree = page.frames().find(f => f.name() === 'tres')`) **y esperar el formulario** (`waitForSelector('select')`) antes de seguir.
+2. **No usar `frame.type` para rellenar campos de texto.** Agrega texto (no reemplaza) y es frágil con Unicode/saltos de línea. Usar `setFieldValue(frame, selector, value)` (lib/daybeat.js): setter por DOM (`$eval` con `input`+`change`), reemplaza el contenido y maneja acentos/newlines. Es el mismo patrón que `updateTransaction`.
+3. **Toda llamada a un flujo asíncrono de menú debe tener `await` + `try/catch`.** La llamada inicial a `registerNewTransaction` en `index.js` no tenía `await`, así que cualquier rechazo (p. ej. escribir sobre un frame muerto) quedaba oculto y parecía que el "sí" se tragaba la ejecución.
+
+Harness de prevención: `lib/register-flow.e2e.test.js` mockea `page`/`frames` (page.frames() devuelve un array mutable), reemplaza solo `getExistingRanges` (simula la navegación reemplazando el frame 'tres' por uno nuevo), `getCurrentUser` y `delay`, y corre el flujo real de `register.js` con `setFieldValue` real. Verifica: (a) tras el guard se escribe en el frame NUEVO y nunca en el viejo, (b) se usa `setFieldValue` y jamás `frame.type`, (c) el valor reemplaza contenido residual (no agrega), (d) se envía el formulario. Si se reintroduce el bug (quitar la re-adquisición o volver a `type`), el test falla.
