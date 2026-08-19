@@ -1,6 +1,6 @@
 require('dotenv').config();
 const puppeteer = require('puppeteer');
-const readline = require('readline');
+const prompt = require('./lib/prompt.js');
 const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
@@ -52,22 +52,6 @@ const {
   getRotatedCommits
 } = require('./lib/git.js');
 
-
-
-// Configurar readline para leer la entrada del usuario
-const rl = readline.createInterface({
-  input: process.stdin,
-  output: process.stdout
-});
-
-// @inquirer/checkbox toma control de stdin y al terminar lo deja PAUSADO:
-// sin resume() el stream no emite 'data' y rl.question queda colgado.
-// No recrear el readline: el listener 'data' del interface existente sigue
-// registrado y recrearlo reactiva raw mode innecesariamente.
-const restoreReadline = () => {
-  try { process.stdin.setRawMode(false); } catch (err) { /* no TTY */ }
-  process.stdin.resume();
-};
 
 
 // Funciones auxiliares.
@@ -260,81 +244,61 @@ const logStage = async (page, label) => {
 const normalizeText = (s) => s ? s.replace(/\s+/g, ' ').trim() : '';
 
 const whriteAndNavigateElementSelect = async (frame, selector, links) => {
-  return new Promise((resolve) => {
-    rl.question('Por favor, elige una opción (número): ', async (choice) => {
-      try {
-        const index = parseInt(choice) - 1;
+  try {
+    const choice = await prompt.ask('Por favor, elige una opción (número): ');
+    const index = parseInt(choice) - 1;
 
-        if (index >= 0 && index < links.length) {
-          const selectedItem = links[index];
-          // Find + click en un solo evaluate: evita el handle huérfano si el
-          // frame navega entre medio (el click dispara la navegación).
-          const clicked = await frame.evaluate((text, sel) => {
-            const elements = Array.from(document.querySelectorAll(sel));
-            const el = elements.find(e => e.textContent.trim() === text);
-            if (el) el.click();
-            return !!el;
-          }, selectedItem.text, selector);
-          if (!clicked) {
-            console.log(`No se encontró la opción "${selectedItem.text}" en la página.`);
-            resolve(null);
-            return;
-          }
-          resolve(selectedItem.text);
-        } else {
-          console.log('Opción inválida.');
-          resolve(null);
-        }
-      } catch (err) {
-        console.log('Error seleccionando la opción:', err.message);
-        resolve(null);
+    if (index >= 0 && index < links.length) {
+      const selectedItem = links[index];
+      // Find + click en un solo evaluate: evita el handle huérfano si el
+      // frame navega entre medio (el click dispara la navegación).
+      const clicked = await frame.evaluate((text, sel) => {
+        const elements = Array.from(document.querySelectorAll(sel));
+        const el = elements.find(e => e.textContent.trim() === text);
+        if (el) el.click();
+        return !!el;
+      }, selectedItem.text, selector);
+      if (!clicked) {
+        console.log(`No se encontró la opción "${selectedItem.text}" en la página.`);
+        return null;
       }
-    });
-  });
+      return selectedItem.text;
+    } else {
+      console.log('Opción inválida.');
+      return null;
+    }
+  } catch (err) {
+    console.log('Error seleccionando la opción:', err.message);
+    return null;
+  }
 }
 
 const selectOptionSelector = async (frame, selector, links) => {
-  return new Promise((resolve) => {
-    // Pedir al usuario que elija una opción
-    rl.question('Por favor, elige una opción (número): ', async (choice) => {
-      const index = parseInt(choice) - 1;
+  const choice = await prompt.ask('Por favor, elige una opción (número): ');
+  const index = parseInt(choice) - 1;
 
-      if (index >= 0 && index < links.length) {
-        // Interactuar con la opción seleccionada
-        const selectedItem = links[index];
-        // console.log(`Seleccionaste: `, selectedItem.text);
-        // Encontrar y seleccionar el elemento seleccionado.
-        await frame.select(selector, selectedItem.value); // Selecciona la opción
-        resolve(); // Resuelve la promesa una vez que la selección se realiza
-      } else {
-        console.log('Opción inválida.');
-        resolve(); // También resuelve aunque la opción sea inválida para continuar el flujo
-      }
-    });
-  });
+  if (index >= 0 && index < links.length) {
+    // Interactuar con la opción seleccionada
+    const selectedItem = links[index];
+    // console.log(`Seleccionaste: `, selectedItem.text);
+    // Encontrar y seleccionar el elemento seleccionado.
+    await frame.select(selector, selectedItem.value); // Selecciona la opción
+  } else {
+    console.log('Opción inválida.');
+  }
 };
 
 const whriteInput = async (frame, selector, title) => {
-  return new Promise((resolve) => {
-    // Pedir al usuario que elija una opción
-    console.log("-------------------------");
-    console.log(title);
-    console.log("-------------------------");
-    rl.question("", async (choice) => {
-      // escribir el input con lo diligenciado por el usuario.
-      await frame.type(selector, choice);
-      resolve();
-    });
-  });
+  console.log("-------------------------");
+  console.log(title);
+  console.log("-------------------------");
+  const choice = await prompt.ask("");
+  // escribir el input con lo diligenciado por el usuario.
+  await frame.type(selector, choice);
 }
 
 const questionUserResponse = async (frame, question) => {
-  return new Promise((resolve) => {
-    // Pedir al usuario que elija una opción
-    rl.question(question, async (choice) => {
-      resolve(choice);
-    });
-  });
+  return prompt.ask(question);
 }
 
 // Selección múltiple interactiva de la actividad de Jira (@inquirer/checkbox):
@@ -384,7 +348,7 @@ const selectJiraActivityMulti = async (activity) => {
   });
 
   if (answer.includes(ALL_JIRA)) {
-    restoreReadline();
+    prompt.restoreReadline();
     return activity;
   }
 
@@ -394,7 +358,7 @@ const selectJiraActivityMulti = async (activity) => {
     else if (sel.kind === 'comment') filtered.comments.push(activity.comments[sel.i]);
     else filtered.worklogs.push(activity.worklogs[sel.i]);
   }
-  restoreReadline();
+  prompt.restoreReadline();
   return filtered;
 }
 
@@ -403,7 +367,7 @@ const selectJiraActivityMulti = async (activity) => {
 
 
 // Menú de período compartido por "Ver días sin registro" y "Registro masivo".
-const askPeriod = (action) => {
+const askPeriod = async (action) => {
   console.log(`\nSeleccione el período a ${action}:`);
   console.log('1. Último mes');
   console.log('2. Últimos 2 meses');
@@ -411,20 +375,17 @@ const askPeriod = (action) => {
   console.log('4. Últimos 15 días');
   console.log('5. Últimos 7 días');
 
-  return new Promise((resolve) => {
-    rl.question('Seleccione opción (1/2/3/4/5): ', (answer) => {
-      const periods = {
-        '1': { days: 30, label: '1 mes' },
-        '2': { days: 60, label: '2 meses' },
-        '3': { days: 90, label: '3 meses' },
-        '4': { days: 15, label: '15 días' },
-        '5': { days: 7, label: '7 días' }
-      };
-      const selected = periods[answer] || periods['1'];
-      console.log(`\nPeríodo seleccionado: ${selected.label}`);
-      resolve(selected);
-    });
-  });
+  const answer = await prompt.ask('Seleccione opción (1/2/3/4/5): ');
+  const periods = {
+    '1': { days: 30, label: '1 mes' },
+    '2': { days: 60, label: '2 meses' },
+    '3': { days: 90, label: '3 meses' },
+    '4': { days: 15, label: '15 días' },
+    '5': { days: 7, label: '7 días' }
+  };
+  const selected = periods[answer] || periods['1'];
+  console.log(`\nPeríodo seleccionado: ${selected.label}`);
+  return selected;
 };
 
 
@@ -460,7 +421,7 @@ const checkHolidaysYear = async () => {
   return holidays;
 };
 
-const getCurrentUser = async (page, rl = null) => {
+const getCurrentUser = async (page) => {
   try {
     // Buscar en todos los frames para mayor robustez
     const frames = page.frames();
@@ -505,24 +466,16 @@ const getCurrentUser = async (page, rl = null) => {
     console.log('[DEBUG] No se encontró el usuario en ningún frame');
     
     // Fallback: preguntar al usuario
-    if (rl) {
-      console.log('\nNo se pudo detectar el usuario automáticamente.');
-      const manualUser = await new Promise((resolve) => {
-        rl.question('Ingresa el nombre exacto que aparece en la columna "Usuario Transacción" (o presiona Enter para omitir): ', (answer) => {
-          resolve(answer.trim() || null);
-        });
-      });
-      
-      if (manualUser) {
-        console.log(`[DEBUG] Usuario ingresado manualmente: "${manualUser}"`);
-      } else {
-        console.log('[DEBUG] Usuario omitido, mostrando todos los registros');
-      }
-      
-      return manualUser;
+    console.log('\nNo se pudo detectar el usuario automáticamente.');
+    const manualUser = (await prompt.ask('Ingresa el nombre exacto que aparece en la columna "Usuario Transacción" (o presiona Enter para omitir): ')).trim() || null;
+
+    if (manualUser) {
+      console.log(`[DEBUG] Usuario ingresado manualmente: "${manualUser}"`);
+    } else {
+      console.log('[DEBUG] Usuario omitido, mostrando todos los registros');
     }
-    
-    return null;
+
+    return manualUser;
   } catch (err) {
     console.log('[DEBUG] Error extrayendo usuario:', err.message);
     return null;
@@ -885,7 +838,7 @@ const showMissingRegistrations = async (page, browser, company, usernameDaybeat,
   await delay(3000);
   
   // Obtener el nombre del usuario logueado para filtrar registros
-  const currentUser = await getCurrentUser(page, rl);
+  const currentUser = await getCurrentUser(page);
   if (currentUser) {
     console.log(`\n[INFO] Filtrando registros del usuario: ${currentUser}`);
   } else {
@@ -971,11 +924,7 @@ const showMissingRegistrations = async (page, browser, company, usernameDaybeat,
         cachePrompt += `, ${missingFromCache.length} FALTANTES`;
       }
       cachePrompt += `) o re-escanear? (cache/reescan): `;
-      const useCache = await new Promise((resolve) => {
-        rl.question(cachePrompt, (answer) => {
-          resolve(answer.trim().toLowerCase() !== 'reescan');
-        });
-      });
+      const useCache = (await prompt.ask(cachePrompt)).trim().toLowerCase() !== 'reescan';
 
       if (useCache) {
         if (cachedUser.dates.length === 0) {
@@ -1072,7 +1021,7 @@ console.log(`\n\nTotal de registros encontrados: ${existingDates.length}`);
   
   console.log('====================================');
   
-  rl.close();
+  prompt.close();
   browser.close();
 };
 
@@ -1107,7 +1056,7 @@ const registerBulkMissingDays = async (page, browser, company, usernameDaybeat, 
   await delay(3000);
   
   // Obtener el nombre del usuario logueado para filtrar registros
-  const currentUser = await getCurrentUser(page, rl);
+  const currentUser = await getCurrentUser(page);
   if (currentUser) {
     console.log(`\n[INFO] Filtrando registros del usuario: ${currentUser}`);
   } else {
@@ -1193,11 +1142,7 @@ const registerBulkMissingDays = async (page, browser, company, usernameDaybeat, 
         cachePrompt += `, ${missingFromCache.length} FALTANTES`;
       }
       cachePrompt += `) o re-escanear? (cache/reescan): `;
-      const useCache = await new Promise((resolve) => {
-        rl.question(cachePrompt, (answer) => {
-          resolve(answer.trim().toLowerCase() !== 'reescan');
-        });
-      });
+      const useCache = (await prompt.ask(cachePrompt)).trim().toLowerCase() !== 'reescan';
 
       if (useCache) {
         if (cachedUser.dates.length === 0) {
@@ -1280,7 +1225,7 @@ console.log(`\n\nTotal de registros encontrados: ${existingDates.length}`);
   
   if (missingDays.length === 0) {
     console.log('¡Todos los días hábiles tienen registro!');
-    rl.close();
+    prompt.close();
     browser.close();
     return;
   }
@@ -1301,15 +1246,11 @@ console.log(`\n\nTotal de registros encontrados: ${existingDates.length}`);
   const links = await listElements(frameTree, 'a', 'itemsint.asp');
   
   console.log('Seleccione la sección donde registrar:');
-  const sectionIndex = await new Promise((resolve) => {
-    rl.question('Número de sección: ', (answer) => {
-      resolve(parseInt(answer) - 1);
-    });
-  });
+  const sectionIndex = parseInt(await prompt.ask('Número de sección: ')) - 1;
   
   if (sectionIndex < 0 || sectionIndex >= links.length) {
     console.log('Opción inválida');
-    rl.close();
+    prompt.close();
     browser.close();
     return;
   }
@@ -1329,7 +1270,7 @@ console.log(`\n\nTotal de registros encontrados: ${existingDates.length}`);
 
   if (!selectedItem) {
     console.log('Opción inválida');
-    rl.close();
+    prompt.close();
     browser.close();
     return;
   }
@@ -1342,15 +1283,11 @@ console.log(`\n\nTotal de registros encontrados: ${existingDates.length}`);
   
   console.log('\nSELECCIONE LA CATEGORIA: ');
   const optionsCategory = await listElements(frameTree, 'select[name="id_categoria"]>option');
-  const categoryIndex = await new Promise((resolve) => {
-    rl.question('Número de categoría: ', (answer) => {
-      resolve(parseInt(answer) - 1);
-    });
-  });
+  const categoryIndex = parseInt(await prompt.ask('Número de categoría: ')) - 1;
   
   if (categoryIndex < 0 || categoryIndex >= optionsCategory.length) {
     console.log('Opción inválida');
-    rl.close();
+    prompt.close();
     browser.close();
     return;
   }
@@ -1363,15 +1300,11 @@ console.log(`\n\nTotal de registros encontrados: ${existingDates.length}`);
   
   console.log('\nSELECCIONE TIPO DE TRANSACCION: ');
   const optionsTransaction = await listElements(frameTree, 'select[name="cod_tipotransaccion"]>option');
-  const transactionIndex = await new Promise((resolve) => {
-    rl.question('Número de tipo de transacción: ', (answer) => {
-      resolve(parseInt(answer) - 1);
-    });
-  });
+  const transactionIndex = parseInt(await prompt.ask('Número de tipo de transacción: ')) - 1;
   
   if (transactionIndex < 0 || transactionIndex >= optionsTransaction.length) {
     console.log('Opción inválida');
-    rl.close();
+    prompt.close();
     browser.close();
     return;
   }
@@ -1395,11 +1328,7 @@ console.log(`\n\nTotal de registros encontrados: ${existingDates.length}`);
   // Preguntar si se desea incluir información de Jira en los reportes
   let useJira = false;
   if (isConfigured()) {
-    const jiraResponse = await new Promise((resolve) => {
-      rl.question('\n¿Desea incluir información de Jira (issues/comentarios/worklogs) en los reportes? (si/no): ', (answer) => {
-        resolve(answer);
-      });
-    });
+    const jiraResponse = await prompt.ask('\n¿Desea incluir información de Jira (issues/comentarios/worklogs) en los reportes? (si/no): ');
     useJira = jiraResponse === 'si';
   }
   
@@ -1410,15 +1339,11 @@ console.log(`\n\nTotal de registros encontrados: ${existingDates.length}`);
   console.log(`Incluir info de Jira: ${useJira ? 'Sí' : 'No'}`);
   console.log(`Días a registrar: ${missingDays.length}`);
   
-  const confirmBulk = await new Promise((resolve) => {
-    rl.question('\n¿Desea continuar con el registro masivo? (si/no): ', (answer) => {
-      resolve(answer);
-    });
-  });
+  const confirmBulk = await prompt.ask('\n¿Desea continuar con el registro masivo? (si/no): ');
   
   if (confirmBulk !== 'si') {
     console.log('Registro masivo cancelado');
-    rl.close();
+    prompt.close();
     browser.close();
     return;
   }
@@ -1644,7 +1569,7 @@ console.log(`\n\nTotal de registros encontrados: ${existingDates.length}`);
   }
   
   await closeConnection();
-  rl.close();
+  prompt.close();
   browser.close();
 };
 
@@ -1781,7 +1706,7 @@ const correctRegistration = async (page, browser, company, usernameDaybeat, pass
   console.log('Login completado, esperando carga de página...');
   await delay(3000);
 
-  const currentUser = await getCurrentUser(page, rl);
+  const currentUser = await getCurrentUser(page);
   if (currentUser) {
     console.log(`\n[INFO] Filtrando registros del usuario: ${currentUser}`);
   }
@@ -2033,7 +1958,7 @@ const correctRegistration = async (page, browser, company, usernameDaybeat, pass
 
   console.log('Proceso finalizado.');
   await closeConnection();
-  rl.close();
+  prompt.close();
   browser.close();
 };
 
@@ -2458,7 +2383,7 @@ const registerNewTransaction = async (frameTree, page, autoData = null, cachedCa
   // que registrar otra cosa con horas distintas es válido.
   let existingRanges = null;
   if (title && formattedDate) {
-    const currentUser = await getCurrentUser(page, rl);
+    const currentUser = await getCurrentUser(page);
     const dayStr = `${dd}/${mm}/${yyyy}`;
     existingRanges = await getExistingRanges(
       frameTree, page, dayStr, currentUser,
@@ -2528,7 +2453,7 @@ const registerNewTransaction = async (frameTree, page, autoData = null, cachedCa
         console.log('  El día ya está completamente registrado.');
         console.log('  Ejecutá de nuevo y usá la opción 4 "Corregir / mover registro" del menú principal para modificar los registros existentes.');
         await closeConnection();
-        rl.close();
+        prompt.close();
         page.browser().close();
         return frameTree;
       }
@@ -2770,7 +2695,7 @@ const finishOrContinue = async (page, browser) => {
   } else {
     console.log('Proceso finalizado.');
     await closeConnection();
-    rl.close();
+    prompt.close();
     browser.close();
   }
 }
@@ -2795,7 +2720,7 @@ const handleGlobalDialog = async (dialog, page, browser) => {
       console.log('ERROR AL REGISTRAR, EJECUTE NUEVAMENTE.');
     }
     await closeConnection();
-    rl.close();
+    prompt.close();
     browser.close();
   }
 };
@@ -2827,11 +2752,7 @@ const showAIConfigMenu = async () => {
     console.log('6. Volver');
     console.log('====================================');
 
-    const option = await new Promise((resolve) => {
-      rl.question('Seleccione opción (1/2/3/4/5/6): ', (answer) => {
-        resolve(answer);
-      });
-    });
+    const option = await prompt.ask('Seleccione opción (1/2/3/4/5/6): ');
 
     if (option === '6') {
       keepRunning = false;
@@ -2845,9 +2766,7 @@ const showAIConfigMenu = async () => {
         const label = name === 'opencode' ? 'OpenCode Zen (modelos gratis)' : 'Gemini';
         console.log(`  ${index + 1}. ${label}`);
       });
-      const choice = await new Promise((resolve) => {
-        rl.question('Seleccione provider: ', (answer) => resolve(answer));
-      });
+      const choice = await prompt.ask('Seleccione provider: ');
       const idx = parseInt(choice, 10) - 1;
       if (idx >= 0 && idx < names.length) {
         ai.setActiveProvider(names[idx]);
@@ -2861,9 +2780,7 @@ const showAIConfigMenu = async () => {
       const detected = ai.detectOpenCodeKey();
       if (detected) {
         console.log(`  ✓ Detectada key de opencode desde:\n    ${detected.source}`);
-        const useIt = await new Promise((resolve) => {
-          rl.question('¿Usar esta key? (si/no): ', (answer) => resolve(answer));
-        });
+        const useIt = await prompt.ask('¿Usar esta key? (si/no): ');
         if (useIt === 'si') {
           ai.saveOpenCodeKey(detected.key, detected.source);
           ai.setActiveProvider('opencode');
@@ -2875,9 +2792,7 @@ const showAIConfigMenu = async () => {
         console.log('\n  No se encontró el auth.json de opencode en esta máquina.');
         console.log(`  Creá tu API key en ${ai.ZEN_SIGNUP_URL} (cuenta gratuita, modelos gratis).`);
         ai.openBrowser(ai.ZEN_SIGNUP_URL);
-        const key = await new Promise((resolve) => {
-          rl.question('Pegá tu API key de OpenCode Zen (o Enter para cancelar): ', (answer) => resolve(answer.trim()));
-        });
+        const key = (await prompt.ask('Pegá tu API key de OpenCode Zen (o Enter para cancelar): ')).trim();
         if (key) {
           ai.saveOpenCodeKey(key, 'manual');
           ai.setActiveProvider('opencode');
@@ -2889,9 +2804,7 @@ const showAIConfigMenu = async () => {
     }
 
     if (option === '3') {
-      const key = await new Promise((resolve) => {
-        rl.question('Pegá tu API key de Google Gemini (o Enter para cancelar): ', (answer) => resolve(answer.trim()));
-      });
+      const key = (await prompt.ask('Pegá tu API key de Google Gemini (o Enter para cancelar): ')).trim();
       if (key) {
         ai.setGeminiKey(key);
         console.log('  ✓ API key de Gemini guardada.');
@@ -2916,9 +2829,7 @@ const showAIConfigMenu = async () => {
         const otherOption = freeModels.length + 2;
         console.log(`  ${allOption}. Ver todos los modelos (incluye pagos)`);
         console.log(`  ${otherOption}. Otro (escribir ID)`);
-        const choice = await new Promise((resolve) => {
-          rl.question('Seleccione modelo: ', (answer) => resolve(answer.trim()));
-        });
+        const choice = (await prompt.ask('Seleccione modelo: ')).trim();
         const idx = parseInt(choice, 10) - 1;
         if (idx >= 0 && idx < freeModels.length) {
           model = freeModels[idx];
@@ -2928,9 +2839,7 @@ const showAIConfigMenu = async () => {
             paidModels.forEach((m, i) => {
               console.log(`  ${i + 1}. ${m}`);
             });
-            const choice2 = await new Promise((resolve) => {
-              rl.question('Seleccione modelo: ', (answer) => resolve(answer.trim()));
-            });
+            const choice2 = (await prompt.ask('Seleccione modelo: ')).trim();
             const idx2 = parseInt(choice2, 10) - 1;
             if (idx2 >= 0 && idx2 < paidModels.length) {
               model = paidModels[idx2];
@@ -2939,14 +2848,10 @@ const showAIConfigMenu = async () => {
             console.log('  No hay más modelos disponibles (lista de respaldo).');
           }
         } else if (choice === String(otherOption)) {
-          model = await new Promise((resolve) => {
-            rl.question('ID del modelo (ej. gpt-5.4-mini): ', (answer) => resolve(answer.trim()));
-          });
+          model = (await prompt.ask('ID del modelo (ej. gpt-5.4-mini): ')).trim();
         }
       } else {
-        model = await new Promise((resolve) => {
-          rl.question(`ID del modelo Gemini (actual: ${ai.getModel('gemini')}, Enter para no cambiar): `, (answer) => resolve(answer.trim()));
-        });
+        model = (await prompt.ask(`ID del modelo Gemini (actual: ${ai.getModel('gemini')}, Enter para no cambiar): `)).trim();
       }
       if (model) {
         ai.setModel(active, model);
@@ -3003,16 +2908,12 @@ const showAIConfigMenu = async () => {
     console.log('7. Salir');
     console.log('====================================');
 
-    const mainOption = await new Promise((resolve) => {
-      rl.question('Seleccione opción (1/2/3/4/5/6/7): ', (answer) => {
-        resolve(answer);
-      });
-    });
+    const mainOption = await prompt.ask('Seleccione opción (1/2/3/4/5/6/7): ');
 
     if (mainOption === '7') {
       console.log('Saliendo...');
       await closeConnection();
-      rl.close();
+      prompt.close();
       browser.close();
       return;
     }
@@ -3032,7 +2933,7 @@ const showAIConfigMenu = async () => {
         console.log(`  - ${display}`);
       }
       console.log('\nPresione Enter para continuar...');
-      await new Promise((resolve) => rl.question('', resolve));
+      await prompt.ask('');
       continue;
     }
 
@@ -3073,9 +2974,9 @@ const showAIConfigMenu = async () => {
   }
   if (!frameTree) {
     console.log('[STAGE] No se encontró el frame tres tras reintentos. Presione Enter para salir.');
-    await new Promise((resolve) => rl.question('', resolve));
+    await prompt.ask('');
     await closeConnection();
-    rl.close();
+    prompt.close();
     browser.close();
     return;
   }
@@ -3266,9 +3167,9 @@ const showAIConfigMenu = async () => {
         console.log('[STAGE] No hay secciones para seleccionar. Estado del frame tres:');
         await logStage(page, 'sin secciones');
         console.log('Se cancela el registro. Presione Enter para salir.');
-        await new Promise((resolve) => rl.question('', resolve));
+        await prompt.ask('');
         await closeConnection();
-        rl.close();
+        prompt.close();
         browser.close();
         return;
       }
