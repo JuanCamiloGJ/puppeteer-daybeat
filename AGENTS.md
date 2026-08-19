@@ -19,6 +19,7 @@ Requires `.env` (see `.env.example`) with: `LINK_DAYBEAT`, `COMPANY`, `USERNAME_
 Optional AI configuration:
 - `GEMINI_API_KEY`: API key for Google Gemini AI. If provided, enables AI-generated summaries.
 - `GEMINI_MODEL`: Model to use (defaults to `gemini-3.1-flash-lite`).
+- AI providers can also be configured from the script itself via menu option "6. Config IA" (see the `lib/ai-config.js` section below) — no env vars needed. `GEMINI_API_KEY` in `.env` remains a valid fallback when no `.daybeat-ai.json` config exists.
 
 Optional Jira configuration (enables mode 5 "Con información de Jira"):
 - `ATLASSIAN_ENABLED=true`: activates the module with **OAuth 2.1** — the first run opens the browser to authorize (one-time; the browser brings the identity, no email/token needed; tokens persisted in `.daybeat-jira-tokens.json` with automatic refresh; no org admin dependency).
@@ -41,7 +42,7 @@ Module (the only one outside `index.js`) that fetches daily activity from Jira. 
 - **Interactive script** — uses `readline` for user prompts (category, transaction type, mode selection, dates, etc.). Cannot run non-interactively or in CI.
 - **Puppeteer runs headed** (`headless: false`, visible window) so a user can watch and intervene — unless `HEADLESS=true` is set in `.env` (launch reads `headless: process.env.HEADLESS === 'true'`). `HEADLESS=true` also suppresses the Jira OAuth `openBrowser()` (the authorization URL is printed to console instead of opening a window).
 - **Frame-based navigation** — Daybeat uses named iframes (`uno`, `tres`). Most DOM interaction targets `frame.name() === 'tres'`; menu hover targets `frame.name() === 'uno'`.
-- **All logic lives in `index.js`** — no entrypoint config beyond `"main": "index.js"`. The only exception is `lib/jira-report.js` (Jira daily activity), consumed by both single and bulk registration.
+- **All logic lives in `index.js`** — no entrypoint config beyond `"main": "index.js"`. The only exceptions are `lib/jira-report.js` (Jira daily activity, consumed by both single and bulk registration) and `lib/ai-config.js` (AI provider config: OpenCode Zen + Gemini).
 - **`bat/`** contains a Windows `.bat` runner and Task Scheduler XML for daily 5:10pm execution. Paths inside the `.bat` must be updated after cloning.
 - **WSL/UNC repos need `-c safe.directory='*'`** — Git for Windows rejects WSL repositories with `fatal: detected dubious ownership` (files owned by another user). Every `git` invocation in `index.js` and `diagnostic-commits.js` uses the `GIT_SAFE_DIR` constant to disable the ownership check per command. GOTCHA: the flag must use DOUBLE quotes (`-c "safe.directory=*"`) — cmd.exe does not strip single quotes (git receives `''*''` literal and no exception matches), which is why single-quoted variants fail on Windows but work from WSL/bash. Some repos may have a manual `safe.directory` exception — e.g. `setup-moderno` — which is why a subset can work without the flag.
 - **Items page paginates at 15/page** — `itemsint.asp` lists items with the `page` URL param (0, 1, 2, ...) and image controls `3dw.gif` (next) / `3up.gif` (prev). Sections with >15 items (common for some users, e.g. jcarvajal: 35/59/97 items) spread across multiple pages. `collectAllItems(frameTree, page)` walks ALL pages (cap `ITEM_MAX_PAGES=20`, same navigation pattern as `extractRegistrations`: detect `3dw.gif` inside an `<a>`, `location.href`, wait for `page=N` via `navigateFrameRobust`, `delay(1500)`, re-find frame `tres`, dedupe by href) and returns per item `{text, href, createHref}` — `href` = item detail (`itemsint_actualizar.asp`), `createHref` = the row's penultimate link (`transaccionesint_crear.asp`, the create form used by registration flows). `selectItemAndNavigate(frameTree, page, items, navigateToDetail)` shows the numbered menu and navigates directly by href (detail or create). Item selection now paginates in: `listAndNavigateNewTransaction`, the cached-path item step (falls back to manual if the cached item is beyond page 0), `correctRegistration`, bulk-registration item pick, and the missing-days scans (`showMissingRegistrations` / `registerBulkMissingDays`). The SECTIONS list (`requerimientos.asp`) does NOT paginate (all sections shown; the `page_req` param is ignored).
@@ -88,8 +89,8 @@ The main menu includes option "3. Registro masivo de días sin registro" which:
 6. For each missing day:
    - Gets commits from that specific day (filtered by author)
    - If no commits that day, uses commits from last 3 days before that date
-   - If Jira is enabled, fetches `getDailyActivity(day)` for that specific date and passes it as `extraContext` to Gemini (or appends it to the detail when no AI)
-   - If `GEMINI_API_KEY` is configured, uses Gemini AI to generate title and detail
+   - If Jira is enabled, fetches `getDailyActivity(day)` for that specific date and passes it as `extraContext` to the AI (or appends it to the detail when no AI)
+   - If the AI is configured (`.daybeat-ai.json` or `GEMINI_API_KEY`), uses it to generate title and detail
    - Falls back to default commit-based summary if AI fails or no API key
    - Registers the transaction with default schedule (from `.daybeat-history.json`)
    - Handles dialog confirmation (registers listener BEFORE submit to avoid race condition)
@@ -127,20 +128,18 @@ This feature iterates through all projects and items to collect all transaction 
 
 Commits are categorized by conventional commit prefix (`feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`). The summary is structured as: "Implementación de: X. Correcciones: Y. Refactorización: Z." Limited to 200 chars.
 
-## AI integration (Gemini)
+## AI integration (`lib/ai-config.js`)
 
-When `GEMINI_API_KEY` is configured, the script can use Google Gemini AI to generate more natural and detailed summaries:
+Central module (like `lib/jira-report.js`) that manages AI providers for title/detail generation. Consumed by `generateWithGemini` in `index.js` (same signature, same prompt, same JSON parsing) — no duplicated logic.
 
-- **Function**: `generateWithGemini(commits)` sends commits to Gemini API and parses JSON response
-- **Endpoint**: `https://generativelanguage.googleapis.com/v1beta/interactions` (uses `x-goog-api-key` header)
-- **Model**: Uses `GEMINI_MODEL` env var (defaults to `gemini-3.1-flash-lite`)
-- **Prompt**: Asks for title (max 100 chars) and detail (max 500 chars) in Spanish
-- **Retry logic**: Implements exponential backoff retry (up to 4 attempts) for 503 errors and timeouts
-- **Fallback**: If AI fails or no API key, falls back to default rule-based summary
-- **Usage**: 
-  - Available as option 2 "Con IA (Gemini)" in single registration mode
-  - Used automatically in bulk registration if API key is present
-  - Shows "✓ Generado con Gemini AI" or "✗ IA falló, usando método por defecto" in console
+- **Providers**: `opencode` (OpenCode Zen, free `*-free` models via the free opencode account) and `gemini` (Google Gemini). One is ACTIVE at a time; `isAIEnabled()` replaces all `process.env.GEMINI_API_KEY` checks.
+- **Store**: `.daybeat-ai.json` (gitignored) — `{ activeProvider, providers: { opencode: {apiKey, model, source}, gemini: {apiKey, model} } }`. If no store exists, `GEMINI_API_KEY`/`GEMINI_MODEL` from `.env` keep working as before (fallback to gemini provider).
+- **OpenCode Zen login** (menu "6. Config IA" → "2. Conectar OpenCode Zen"): `detectOpenCodeKey()` reads the CLI's `~/.local/share/opencode/auth.json` (Windows: `%USERPROFILE%\.local\share\opencode\auth.json`) and imports `opencode.key` (fallback `opencode-go.key`); if absent, opens `https://opencode.ai/auth` (`openBrowser`, respects `HEADLESS`) and asks to paste the key. There is NO OAuth — Zen authenticates with an API key.
+- **Zen endpoint**: OpenAI-compatible `POST https://opencode.ai/zen/v1/chat/completions` with `Authorization: Bearer <key>` → `data.choices[0].message.content`. The model list is fetched LIVE from `GET https://opencode.ai/zen/v1/models` (`getZenModels`, cached 24h in `.daybeat-ai.json` as `modelsCache`, fallback to hardcoded `ZEN_FREE_MODELS`); free models are identified by the `-free` suffix (`isFreeModel`). Free models (default `deepseek-v4-flash-free`): `deepseek-v4-flash-free`, `mimo-v2.5-free`, `hy3-free`, `laguna-s-2.1-free`, `nemotron-3-ultra-free`, `nemotron-3.5-lightning-free`, `big-pickle`. NOTE: free models rate-limit per account (`FreeUsageLimitError` 429); retries happen, but switching models may be needed.
+- **Gemini endpoint**: unchanged `https://generativelanguage.googleapis.com/v1beta/interactions` (`x-goog-api-key`).
+- **Retry**: `fetchWithRetry` — up to 4 attempts, exponential backoff, for 503/429 and network timeouts. Returns the model's RAW text; `generateWithGemini` parses the JSON `{title, detail}` and truncates (unchanged).
+- **Failure model**: module never throws toward the registration flow — `callAI`/`testConnection` return null/`{ok:false}` and callers fall back to rule-based summaries.
+- **Menu "6. Config IA"** (before "Salir", no Daybeat login needed): change active provider, connect OpenCode Zen, set Gemini key, change model, test connection.
 
 ## Commit retrieval functions
 
@@ -156,6 +155,7 @@ When `GEMINI_API_KEY` is configured, the script can use Google Gemini AI to gene
 - `.daybeat-repos.json`: caches discovered git repositories (auto-refresh after 7 days). Supports `--rescan` flag to force refresh. Added to `.gitignore`.
 - `.daybeat-path.json`: caches the daily registration path (section, item, category, transaction type). Auto-updates after each successful registration. Prompts user to reuse cached path on next registration. Added to `.gitignore`.
 - `.daybeat-jira-tokens.json`: persists the OAuth 2.1 tokens of the Jira module (client info, tokens, discovery state). Auto-refresh on every run; interactive re-auth only when the refresh fails. Added to `.gitignore`.
+- `.daybeat-ai.json`: persists the AI provider config (active provider, API keys, models, opencode key source). Created/edited from menu "6. Config IA". Added to `.gitignore`.
 - `holidays.json`: stores holidays for the current year (format: `{ "year": 2026, "holidays": ["DD/MM/YYYY", ...] }`). Auto-prompts for update when year changes. Shared between users (not in `.gitignore`).
 
 ## Main menu
@@ -166,7 +166,8 @@ The main menu includes:
 3. Registro masivo de días sin registro
 4. **Corregir / mover registro**
 5. Re-escanear repositorios
-6. Salir
+6. **Config IA**
+7. Salir
 
 ## Corregir / mover registro (menu option 4)
 

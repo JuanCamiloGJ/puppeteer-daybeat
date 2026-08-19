@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
 const { isConfigured, getDailyActivity, formatActivityForReport, closeConnection } = require('./lib/jira-report.js');
+const ai = require('./lib/ai-config.js');
 
 // Git para Windows rechaza repositorios WSL/UNC por "dubious ownership"
 // (archivos con otro dueño). Este flag desactiva esa protección por comando.
@@ -1006,10 +1007,7 @@ const smartTruncate = (text, maxLength) => {
 };
 
 const generateWithGemini = async (commits, context = 'same-day', targetDate = null, extraContext = null) => {
-  const apiKey = process.env.GEMINI_API_KEY;
-  const model = process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite';
-  
-  if (!apiKey) {
+  if (!ai.isAIEnabled()) {
     return null;
   }
   
@@ -1050,105 +1048,42 @@ REGLAS IMPORTANTES:
 Responde SOLO en formato JSON válido, sin texto adicional:
 {"title": "título corto aquí", "detail": "descripción detallada aquí"}`;
   
-  const maxRetries = 4;
-  const baseDelay = 2000; // 2 segundos
+  const text = await ai.callAI(prompt);
   
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      const url = 'https://generativelanguage.googleapis.com/v1beta/interactions';
-      console.log(`  [IA] Usando modelo: ${model}`);
-      console.log(`  [IA] Intento ${attempt}/${maxRetries}...`);
-      
-      const startTime = Date.now();
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-goog-api-key': apiKey
-        },
-        body: JSON.stringify({
-          model: model,
-          input: prompt
-        }),
-        signal: AbortSignal.timeout(60000)
-      });
-      
-      const responseTime = Date.now() - startTime;
-      console.log(`  [IA] Respuesta recibida en ${responseTime}ms`);
-      
-      if (!response.ok) {
-        const errorBody = await response.text();
-        console.log(`  [IA] Error en API: ${response.status}`);
-        console.log(`  [IA] Detalle: ${errorBody.substring(0, 200)}`);
-        
-        // Retry solo para errores 503 (Service Unavailable)
-        if (response.status === 503 && attempt < maxRetries) {
-          const delay = baseDelay * Math.pow(2, attempt - 1);
-          console.log(`  [IA] Reintentando en ${delay/1000}s...`);
-          await new Promise(resolve => setTimeout(resolve, delay));
-          continue;
-        }
-        
-        return null;
-      }
-      
-      const data = await response.json();
-      
-      // Buscar el step con type === "model_output"
-      const outputStep = data.steps?.find(step => step.type === 'model_output');
-      const text = outputStep?.content?.[0]?.text;
-      
-      if (!text) {
-        console.log('  [IA] Respuesta vacía de Gemini');
-        return null;
-      }
-      
-      // Intentar parsear JSON de la respuesta
-      let result;
-      try {
-        // Buscar JSON en la respuesta (puede tener texto adicional)
-        const jsonMatch = text.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-          result = JSON.parse(jsonMatch[0]);
-        } else {
-          console.log('  [IA] No se encontró JSON válido en la respuesta');
-          return null;
-        }
-      } catch (parseErr) {
-        console.log('  [IA] Error parseando JSON:', parseErr.message);
-        return null;
-      }
-      
-      if (!result.title || !result.detail) {
-        console.log('  [IA] Respuesta incompleta');
-        return null;
-      }
-      
-      // Limitar longitud
-      let title = result.title;
-      let detail = result.detail;
-      
-      title = smartTruncate(title, 100);
-      detail = smartTruncate(detail, 1000);
-      
-      return { title, detail };
-      
-    } catch (err) {
-      console.log(`  [IA] Error en intento ${attempt}: ${err.message}`);
-      
-      // Retry para errores de timeout o red
-      if (attempt < maxRetries) {
-        const delay = baseDelay * Math.pow(2, attempt - 1);
-        console.log(`  [IA] Reintentando en ${delay/1000}s...`);
-        await new Promise(resolve => setTimeout(resolve, delay));
-        continue;
-      }
-      
-      return null;
-    }
+  if (!text) {
+    console.log('  [IA] Respuesta vacía o error del provider');
+    return null;
   }
   
-  return null;
+  // Intentar parsear JSON de la respuesta
+  let result;
+  try {
+    // Buscar JSON en la respuesta (puede tener texto adicional)
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      result = JSON.parse(jsonMatch[0]);
+    } else {
+      console.log('  [IA] No se encontró JSON válido en la respuesta');
+      return null;
+    }
+  } catch (parseErr) {
+    console.log('  [IA] Error parseando JSON:', parseErr.message);
+    return null;
+  }
+  
+  if (!result.title || !result.detail) {
+    console.log('  [IA] Respuesta incompleta');
+    return null;
+  }
+  
+  // Limitar longitud
+  let title = result.title;
+  let detail = result.detail;
+  
+  title = smartTruncate(title, 100);
+  detail = smartTruncate(detail, 1000);
+  
+  return { title, detail };
 };
 
 const HISTORY_FILE = path.join(__dirname, '.daybeat-history.json');
@@ -2310,8 +2245,8 @@ const registerBulkMissingDays = async (page, browser, company, usernameDaybeat, 
       }
       
       if (context === 'no-commits') {
-        if (process.env.GEMINI_API_KEY) {
-          console.log('  Generando texto variado con Gemini AI...');
+        if (ai.isAIEnabled()) {
+          console.log('  Generando texto variado con la IA...');
           const fakeCommits = ['Sin commits específicos'];
           const aiResult = await generateWithGemini(fakeCommits, 'no-commits', day, extraContext);
           
@@ -2319,7 +2254,7 @@ const registerBulkMissingDays = async (page, browser, company, usernameDaybeat, 
             title = aiResult.title;
             detail = aiResult.detail;
             geminiUsed = true;
-            console.log('  ✓ Texto variado generado con Gemini AI');
+            console.log('  ✓ Texto variado generado con la IA');
           } else {
             console.log('  ✗ IA falló, usando texto genérico por defecto');
             const genericText = generateGenericText(day);
@@ -2327,20 +2262,20 @@ const registerBulkMissingDays = async (page, browser, company, usernameDaybeat, 
             detail = genericText.detail;
           }
         } else {
-          console.log('  Sin GEMINI_API_KEY, usando texto genérico variado');
+          console.log('  Sin IA configurada, usando texto genérico variado');
           const genericText = generateGenericText(day);
           title = genericText.title;
           detail = genericText.detail;
         }
-      } else if (process.env.GEMINI_API_KEY && commitsToUse.length > 0) {
-        console.log(`  Generando con Gemini AI (contexto: ${context})...`);
+      } else if (ai.isAIEnabled() && commitsToUse.length > 0) {
+        console.log(`  Generando con la IA (contexto: ${context})...`);
         const aiResult = await generateWithGemini(commitsToUse, context, day, extraContext);
         
         if (aiResult) {
           title = aiResult.title;
           detail = aiResult.detail;
           geminiUsed = true;
-          console.log('  ✓ Generado con Gemini AI');
+          console.log('  ✓ Generado con la IA');
         } else {
           console.log('  ✗ IA falló, usando método por defecto');
           const prefix = getContextPrefix(day, commitsWithDates);
@@ -2349,8 +2284,8 @@ const registerBulkMissingDays = async (page, browser, company, usernameDaybeat, 
           detail = generateDetail(commitsToUse);
         }
       } else {
-        if (!process.env.GEMINI_API_KEY && commitsToUse.length > 0) {
-          console.log('  Sin GEMINI_API_KEY, usando método por defecto');
+        if (!ai.isAIEnabled() && commitsToUse.length > 0) {
+          console.log('  Sin IA configurada, usando método por defecto');
         }
         const prefix = getContextPrefix(day, commitsWithDates);
         const summary = summarizeCommits(commitsToUse);
@@ -3058,7 +2993,7 @@ const registerNewTransaction = async (frameTree, page, autoData = null, cachedCa
     
     // Preguntar por contexto adicional (solo registro diario con IA)
     let extraContext = null;
-    if (process.env.GEMINI_API_KEY && allCommits.length > 0) {
+    if (ai.isAIEnabled() && allCommits.length > 0) {
       console.log('\nCommits encontrados:');
       for (const commit of allCommits.slice(0, 10)) {
         console.log(`  - ${commit.substring(0, 80)}`);
@@ -3077,22 +3012,22 @@ const registerNewTransaction = async (frameTree, page, autoData = null, cachedCa
     }
     
     // Intentar generar con IA
-    if (process.env.GEMINI_API_KEY && allCommits.length > 0) {
-      console.log('  Generando con Gemini AI...');
+    if (ai.isAIEnabled() && allCommits.length > 0) {
+      console.log('  Generando con la IA...');
       const aiResult = await generateWithGemini(allCommits, 'same-day', null, extraContext);
       
       if (aiResult) {
         title = aiResult.title;
         detail = aiResult.detail;
-        console.log('  ✓ Generado con Gemini AI');
+        console.log('  ✓ Generado con la IA');
       } else {
         console.log('  ✗ IA falló, usando método por defecto');
         title = allCommits.length > 0 ? summarizeCommits(allCommits) : generateFakeSummary(allCommits);
         detail = generateDetail(allCommits);
       }
     } else {
-      if (!process.env.GEMINI_API_KEY) {
-        console.log('  No hay GEMINI_API_KEY, usando método por defecto');
+      if (!ai.isAIEnabled()) {
+        console.log('  Sin IA configurada, usando método por defecto');
       }
       title = allCommits.length > 0 ? summarizeCommits(allCommits) : generateFakeSummary(allCommits);
       detail = generateDetail(allCommits);
@@ -3175,19 +3110,19 @@ const registerNewTransaction = async (frameTree, page, autoData = null, cachedCa
     
     // Generar reporte con IA o por defecto
     let geminiUsed = false;
-    if (process.env.GEMINI_API_KEY && allCommits.length > 0) {
-      console.log('  Generando con Gemini AI...');
+    if (ai.isAIEnabled() && allCommits.length > 0) {
+      console.log('  Generando con la IA...');
       const aiResult = await generateWithGemini(allCommits, 'same-day', null, jiraContext);
       if (aiResult) {
         title = aiResult.title;
         detail = aiResult.detail;
         geminiUsed = true;
-        console.log('  ✓ Generado con Gemini AI');
+        console.log('  ✓ Generado con la IA');
       } else {
         console.log('  ✗ IA falló, usando método por defecto');
       }
-    } else if (!process.env.GEMINI_API_KEY) {
-      console.log('  No hay GEMINI_API_KEY, usando método por defecto');
+    } else if (!ai.isAIEnabled()) {
+      console.log('  Sin IA configurada, usando método por defecto');
     }
     
     if (!geminiUsed) {
@@ -3360,7 +3295,7 @@ const registerNewTransaction = async (frameTree, page, autoData = null, cachedCa
       // Generar título/detalle de CADA bloque antes del preview (con IA en
       // modos 2 y 5). Se guardan en block.title/block.detail: lo que muestra
       // el preview es exactamente lo que se registra.
-      const useAI = process.env.GEMINI_API_KEY;
+      const useAI = ai.isAIEnabled();
       for (let i = 0; i < blocks.length; i++) {
         const block = blocks[i];
         const blockCommits = block.events.filter(ev => ev.kind === 'commit').map(ev => ev.label);
@@ -3619,6 +3554,169 @@ const delay = (time) => {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Configuración de IA (menú principal, opción 6): providers, credenciales y
+// modelos. No requiere login a Daybeat.
+// ---------------------------------------------------------------------------
+
+const showAIConfigMenu = async () => {
+  let keepRunning = true;
+  while (keepRunning) {
+    console.log('====================================');
+    console.log('CONFIGURACIÓN DE IA');
+    console.log('====================================');
+    console.log(ai.getStatus());
+    console.log('------------------------------------');
+    console.log('1. Cambiar provider activo');
+    console.log('2. Conectar OpenCode Zen (modelos gratis)');
+    console.log('3. Configurar Gemini (API key)');
+    console.log('4. Cambiar modelo');
+    console.log('5. Probar conexión');
+    console.log('6. Volver');
+    console.log('====================================');
+
+    const option = await new Promise((resolve) => {
+      rl.question('Seleccione opción (1/2/3/4/5/6): ', (answer) => {
+        resolve(answer);
+      });
+    });
+
+    if (option === '6') {
+      keepRunning = false;
+      continue;
+    }
+
+    if (option === '1') {
+      const names = ai.getProviderNames();
+      console.log('Providers disponibles:');
+      names.forEach((name, index) => {
+        const label = name === 'opencode' ? 'OpenCode Zen (modelos gratis)' : 'Gemini';
+        console.log(`  ${index + 1}. ${label}`);
+      });
+      const choice = await new Promise((resolve) => {
+        rl.question('Seleccione provider: ', (answer) => resolve(answer));
+      });
+      const idx = parseInt(choice, 10) - 1;
+      if (idx >= 0 && idx < names.length) {
+        ai.setActiveProvider(names[idx]);
+        console.log(`  ✓ Provider activo: ${names[idx]}`);
+      } else {
+        console.log('  Opción inválida.');
+      }
+    }
+
+    if (option === '2') {
+      const detected = ai.detectOpenCodeKey();
+      if (detected) {
+        console.log(`  ✓ Detectada key de opencode desde:\n    ${detected.source}`);
+        const useIt = await new Promise((resolve) => {
+          rl.question('¿Usar esta key? (si/no): ', (answer) => resolve(answer));
+        });
+        if (useIt === 'si') {
+          ai.saveOpenCodeKey(detected.key, detected.source);
+          ai.setActiveProvider('opencode');
+          console.log('  ✓ OpenCode Zen conectado y activo.');
+        } else {
+          console.log('  Cancelado.');
+        }
+      } else {
+        console.log('\n  No se encontró el auth.json de opencode en esta máquina.');
+        console.log(`  Creá tu API key en ${ai.ZEN_SIGNUP_URL} (cuenta gratuita, modelos gratis).`);
+        ai.openBrowser(ai.ZEN_SIGNUP_URL);
+        const key = await new Promise((resolve) => {
+          rl.question('Pegá tu API key de OpenCode Zen (o Enter para cancelar): ', (answer) => resolve(answer.trim()));
+        });
+        if (key) {
+          ai.saveOpenCodeKey(key, 'manual');
+          ai.setActiveProvider('opencode');
+          console.log('  ✓ OpenCode Zen conectado y activo.');
+        } else {
+          console.log('  Cancelado.');
+        }
+      }
+    }
+
+    if (option === '3') {
+      const key = await new Promise((resolve) => {
+        rl.question('Pegá tu API key de Google Gemini (o Enter para cancelar): ', (answer) => resolve(answer.trim()));
+      });
+      if (key) {
+        ai.setGeminiKey(key);
+        console.log('  ✓ API key de Gemini guardada.');
+      } else {
+        console.log('  Cancelado.');
+      }
+    }
+
+    if (option === '4') {
+      const active = ai.getActiveProvider();
+      console.log(`Provider actual: ${active}`);
+      let model = null;
+      if (active === 'opencode') {
+        const zenModels = await ai.getZenModels();
+        const freeModels = zenModels.filter(ai.isFreeModel);
+        const paidModels = zenModels.filter(m => !ai.isFreeModel(m));
+        console.log('Modelos gratis de OpenCode Zen:');
+        freeModels.forEach((m, index) => {
+          console.log(`  ${index + 1}. ${m}`);
+        });
+        const allOption = freeModels.length + 1;
+        const otherOption = freeModels.length + 2;
+        console.log(`  ${allOption}. Ver todos los modelos (incluye pagos)`);
+        console.log(`  ${otherOption}. Otro (escribir ID)`);
+        const choice = await new Promise((resolve) => {
+          rl.question('Seleccione modelo: ', (answer) => resolve(answer.trim()));
+        });
+        const idx = parseInt(choice, 10) - 1;
+        if (idx >= 0 && idx < freeModels.length) {
+          model = freeModels[idx];
+        } else if (choice === String(allOption)) {
+          if (paidModels.length > 0) {
+            console.log('Todos los modelos de OpenCode Zen:');
+            paidModels.forEach((m, i) => {
+              console.log(`  ${i + 1}. ${m}`);
+            });
+            const choice2 = await new Promise((resolve) => {
+              rl.question('Seleccione modelo: ', (answer) => resolve(answer.trim()));
+            });
+            const idx2 = parseInt(choice2, 10) - 1;
+            if (idx2 >= 0 && idx2 < paidModels.length) {
+              model = paidModels[idx2];
+            }
+          } else {
+            console.log('  No hay más modelos disponibles (lista de respaldo).');
+          }
+        } else if (choice === String(otherOption)) {
+          model = await new Promise((resolve) => {
+            rl.question('ID del modelo (ej. gpt-5.4-mini): ', (answer) => resolve(answer.trim()));
+          });
+        }
+      } else {
+        model = await new Promise((resolve) => {
+          rl.question(`ID del modelo Gemini (actual: ${ai.getModel('gemini')}, Enter para no cambiar): `, (answer) => resolve(answer.trim()));
+        });
+      }
+      if (model) {
+        ai.setModel(active, model);
+        console.log(`  ✓ Modelo de ${active}: ${model}`);
+      } else {
+        console.log('  No se cambió el modelo.');
+      }
+    }
+
+    if (option === '5') {
+      console.log('  Probando conexión con la IA...');
+      const result = await ai.testConnection();
+      if (result.ok) {
+        console.log(`  ✓ Conexión OK (${result.provider} · ${result.model}):`);
+        console.log(`    ${result.text}`);
+      } else {
+        console.log(`  ✗ ${result.error}`);
+      }
+    }
+  }
+};
+
 (async () => {
   // HEADLESS: 'true' oculta el navegador (sin ventana); 'false' lo muestra.
   const browser = await puppeteer.launch({ headless: process.env.HEADLESS === 'true' });
@@ -3649,21 +3747,27 @@ const delay = (time) => {
     console.log('3. Registro masivo de días sin registro');
     console.log('4. Corregir / mover registro');
     console.log('5. Re-escanear repositorios');
-    console.log('6. Salir');
+    console.log('6. Config IA');
+    console.log('7. Salir');
     console.log('====================================');
 
     const mainOption = await new Promise((resolve) => {
-      rl.question('Seleccione opción (1/2/3/4/5/6): ', (answer) => {
+      rl.question('Seleccione opción (1/2/3/4/5/6/7): ', (answer) => {
         resolve(answer);
       });
     });
 
-    if (mainOption === '6') {
+    if (mainOption === '7') {
       console.log('Saliendo...');
       await closeConnection();
       rl.close();
       browser.close();
       return;
+    }
+
+    if (mainOption === '6') {
+      await showAIConfigMenu();
+      continue;
     }
 
     if (mainOption === '5') {

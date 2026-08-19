@@ -4,3 +4,4 @@ node_modules/
 .daybeat-repos.json
 .daybeat-path.json
 .daybeat-jira-tokens.json
+.daybeat-ai.json
