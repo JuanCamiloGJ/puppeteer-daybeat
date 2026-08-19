@@ -108,6 +108,92 @@ const listElements = async (frame, selector) => {
   return links;
 }
 
+// La lista de items (itemsint.asp) pagina de a ~15 con el parámetro `page`
+// (0, 1, 2, ...) y los controles de imagen 3dw.gif (siguiente) / 3up.gif
+// (anterior). Este helper recorre TODAS las páginas y devuelve por cada item
+// su nombre, el href del detalle (itemsint_actualizar.asp) y el href del link
+// "crear transacción" (transaccionesint_crear.asp — el penúltimo de la fila),
+// que es el que los flujos de registro usan para abrir el formulario.
+const ITEM_MAX_PAGES = 20;
+
+const collectAllItems = async (frameTree, page) => {
+  const items = [];
+  const seen = new Set();
+  for (let i = 0; i < ITEM_MAX_PAGES; i++) {
+    frameTree = page.frames().find(frame => frame.name() === 'tres');
+    const pageItems = await frameTree.evaluate(() => {
+      return Array.from(document.querySelectorAll('tr'))
+        .map(tr => {
+          const nameLink = Array.from(tr.querySelectorAll('a'))
+            .find(a => a.href.includes('itemsint_actualizar.asp') && a.textContent.trim() !== '');
+          if (!nameLink) return null;
+          const rowLinks = Array.from(tr.querySelectorAll('a'));
+          const createLink = rowLinks[rowLinks.length - 2];
+          return {
+            text: nameLink.textContent.trim(),
+            href: nameLink.href,
+            createHref: createLink ? createLink.href : nameLink.href
+          };
+        })
+        .filter(Boolean);
+    });
+    for (const item of pageItems) {
+      if (!seen.has(item.href)) {
+        seen.add(item.href);
+        items.push(item);
+      }
+    }
+
+    // Buscar el enlace de "siguiente página" (solo 3dw.gif: 3up.gif es anterior)
+    const nextHref = await frameTree.evaluate(() => {
+      for (const link of Array.from(document.querySelectorAll('a'))) {
+        const img = link.querySelector('img');
+        if (!img) continue;
+        const src = img.src.toLowerCase();
+        if (src.includes('regresar') || src.includes('back') || src.includes('return')) continue;
+        if (src.includes('3dw.gif')) return link.href;
+      }
+      return null;
+    });
+
+    if (!nextHref) break;
+    await frameTree.evaluate((href) => {
+      window.location.href = href;
+    }, nextHref);
+    await frameTree.waitForNavigation();
+    await delay(1500);
+  }
+  return items;
+};
+
+// Muestra el menú numerado de items recolectados y navega directamente al
+// elegido: detail = href del detalle (itemsint_actualizar.asp), de lo
+// contrario href del formulario de creación (transaccionesint_crear.asp).
+const selectItemAndNavigate = async (frameTree, page, items, navigateToDetail = false) => {
+  console.log('---------------------');
+  console.log('OPCIONES DISPONIBLES:');
+  console.log('---------------------');
+  items.forEach((item, index) => {
+    console.log(`${index + 1}. ${item.text}`);
+  });
+  console.log('---------------------');
+
+  const choice = await questionUserResponse(frameTree, 'Por favor, elige una opción (número): ');
+  const index = parseInt(choice) - 1;
+  if (index < 0 || index >= items.length) {
+    console.log('Opción inválida.');
+    return null;
+  }
+
+  const selected = items[index];
+  const target = navigateToDetail ? selected.href : selected.createHref;
+  await frameTree.evaluate((href) => {
+    window.location.href = href;
+  }, target);
+  await frameTree.waitForNavigation();
+  return selected;
+}
+
 const normalizeText = (s) => s ? s.replace(/\s+/g, ' ').trim() : '';
 
 const whriteAndNavigateElementSelect = async (frame, selector, links) => {
@@ -124,44 +210,6 @@ const whriteAndNavigateElementSelect = async (frame, selector, links) => {
 
         if (linkHandle) {
           await frame.evaluate(el => el.click(), linkHandle);
-        }
-        resolve(selectedItem.text);
-      } else {
-        console.log('Opción inválida.');
-        resolve(null);
-      }
-    });
-  });
-}
-
-const whriteAndNavigateOtherElementSelect = async (frame, selector, links) => {
-  return new Promise((resolve) => {
-    rl.question('Por favor, elige una opción (número): ', async (choice) => {
-      const index = parseInt(choice) - 1;
-
-      if (index >= 0 && index < links.length) {
-        const selectedItem = links[index];
-
-        const linkHandle = await frame.evaluateHandle((text, selector) => {
-          const elements = Array.from(document.querySelectorAll(selector));
-          const elementSelect = elements.find(el => el.textContent.trim() === text);
-
-          if (elementSelect) {
-            const parentTd = elementSelect.parentElement;
-            const grandParentTr = parentTd.parentElement;
-            const allLinksInRow = Array.from(grandParentTr.querySelectorAll('td > a'));
-
-            if (allLinksInRow.length >= 2) {
-              const penultimateLink = allLinksInRow[allLinksInRow.length - 2];
-              return penultimateLink;
-            }
-          }
-
-          return null;
-        }, selectedItem.text, selector);
-
-        if (linkHandle) {
-          await linkHandle.click();
         }
         resolve(selectedItem.text);
       } else {
@@ -1716,16 +1764,8 @@ const showMissingRegistrations = async (page, browser, company, usernameDaybeat,
     // Guardar URL de items para volver
     const itemsUrl = await frameTree.evaluate(() => window.location.href);
     
-    // Buscar items en este proyecto
-    const items = await frameTree.evaluate(() => {
-      const links = Array.from(document.querySelectorAll('a'));
-      return links
-        .filter(link => link.href.includes('itemsint_actualizar.asp'))
-        .map(link => ({
-          text: link.textContent.trim(),
-          href: link.href
-        }));
-    });
+    // Buscar items en este proyecto (todas las páginas)
+    const items = await collectAllItems(frameTree, page);
     
     console.log(`  Items encontrados: ${items.length}`);
     
@@ -1914,15 +1954,7 @@ const registerBulkMissingDays = async (page, browser, company, usernameDaybeat, 
     
     const itemsUrl = await frameTree.evaluate(() => window.location.href);
     
-    const items = await frameTree.evaluate(() => {
-      const links = Array.from(document.querySelectorAll('a'));
-      return links
-        .filter(link => link.href.includes('itemsint_actualizar.asp'))
-        .map(link => ({
-          text: link.textContent.trim(),
-          href: link.href
-        }));
-    });
+    const items = await collectAllItems(frameTree, page);
     
     console.log(`  Items encontrados: ${items.length}`);
     
@@ -2015,46 +2047,18 @@ const registerBulkMissingDays = async (page, browser, company, usernameDaybeat, 
   await delay(1500);
   
   frameTree = page.frames().find(frame => frame.name() === 'tres');
-  const otherLinks = await listElements(frameTree, 'a');
-  
+  const items = await collectAllItems(frameTree, page);
+
   console.log('Seleccione el item donde registrar:');
-  const itemIndex = await new Promise((resolve) => {
-    rl.question('Número de item: ', (answer) => {
-      resolve(parseInt(answer) - 1);
-    });
-  });
-  
-  if (itemIndex < 0 || itemIndex >= otherLinks.length) {
+  const selectedItem = await selectItemAndNavigate(frameTree, page, items, false);
+
+  if (!selectedItem) {
     console.log('Opción inválida');
     rl.close();
     browser.close();
     return;
   }
-  
-  const selectedItem = otherLinks[itemIndex];
-  const itemHandle = await frameTree.evaluateHandle((text, selector) => {
-    const elements = Array.from(document.querySelectorAll(selector));
-    const elementSelect = elements.find(el => el.textContent.trim() === text);
-    if (elementSelect) {
-      const parentTd = elementSelect.parentElement;
-      const grandParentTr = parentTd.parentElement;
-      const allLinksInRow = Array.from(grandParentTr.querySelectorAll('td > a'));
-      if (allLinksInRow.length >= 2) {
-        return allLinksInRow[allLinksInRow.length - 2];
-      }
-    }
-    return null;
-  }, selectedItem.text, 'a');
-  
-  if (!itemHandle) {
-    console.log('No se encontró el item');
-    rl.close();
-    browser.close();
-    return;
-  }
-  
-  await itemHandle.click();
-  await frameTree.waitForNavigation();
+
   await delay(1500);
   
   frameTree = page.frames().find(frame => frame.name() === 'tres');
@@ -2582,20 +2586,20 @@ const correctRegistration = async (page, browser, company, usernameDaybeat, pass
   // Seleccionar item: el link con el texto del item es el detalle
   // (itemsint_actualizar.asp), no el formulario de creación.
   frameTree = page.frames().find(frame => frame.name() === 'tres');
+  const otherLinks = await collectAllItems(frameTree, page);
   if (useCachedPath) {
-    const otherLinks = await listElements(frameTree, 'a');
     const itemIdx = otherLinks.findIndex(l => normalizeText(l.text) === normalizeText(cachedPath.item.text));
     if (itemIdx >= 0) {
-      const itemHandle = await frameTree.evaluateHandle((text, selector) => {
-        const elements = Array.from(document.querySelectorAll(selector));
-        return elements.find(el => el.textContent.trim() === text);
-      }, otherLinks[itemIdx].text, 'a');
-      if (itemHandle) await itemHandle.click();
+      await frameTree.evaluate((href) => {
+        window.location.href = href;
+      }, otherLinks[itemIdx].href);
       await frameTree.waitForNavigation();
+    } else {
+      console.log('\nEl item anterior ya no existe. Seleccione manualmente.');
+      await selectItemAndNavigate(frameTree, page, otherLinks, true);
     }
   } else {
-    await whriteAndNavigateElementSelect(frameTree, 'a', await listElements(frameTree, 'a'));
-    await frameTree.waitForNavigation();
+    await selectItemAndNavigate(frameTree, page, otherLinks, true);
   }
 
   frameTree = page.frames().find(frame => frame.name() === 'tres');
@@ -2747,8 +2751,9 @@ const correctRegistration = async (page, browser, company, usernameDaybeat, pass
 
 const listAndNavigateNewTransaction = async (frameTree, page) => {
   frameTree = page.frames().find(frame => frame.name() === 'tres');
-  const otherLinks = await listElements(frameTree, 'a');
-  return await whriteAndNavigateOtherElementSelect(frameTree, 'a', otherLinks);
+  const items = await collectAllItems(frameTree, page);
+  const selected = await selectItemAndNavigate(frameTree, page, items, false);
+  return selected ? selected.text : null;
 }
 
 const registerNewTransaction = async (frameTree, page, autoData = null, cachedCategory = null, cachedTransaction = null, sectionText = null, itemText = null) => {
@@ -3757,27 +3762,21 @@ const delay = (time) => {
     await frameTree.waitForNavigation();
     
     if (useCachedPath) {
-      // Navegar al item automáticamente
+      // Navegar al item automáticamente (buscando en todas las páginas)
       frameTree = page.frames().find(frame => frame.name() === 'tres');
-      const otherLinks = await listElements(frameTree, 'a');
+      const otherLinks = await collectAllItems(frameTree, page);
       const itemIdx = otherLinks.findIndex(l => normalizeText(l.text) === normalizeText(cachedPath.item.text));
       if (itemIdx >= 0) {
         const selectedItem = otherLinks[itemIdx];
-        const itemHandle = await frameTree.evaluateHandle((text, selector) => {
-          const elements = Array.from(document.querySelectorAll(selector));
-          const elementSelect = elements.find(el => el.textContent.trim() === text);
-          if (elementSelect) {
-            const parentTd = elementSelect.parentElement;
-            const grandParentTr = parentTd.parentElement;
-            const allLinksInRow = Array.from(grandParentTr.querySelectorAll('td > a'));
-            if (allLinksInRow.length >= 2) {
-              return allLinksInRow[allLinksInRow.length - 2];
-            }
-          }
-          return null;
-        }, selectedItem.text, 'a');
-        if (itemHandle) await itemHandle.click();
+        await frameTree.evaluate((href) => {
+          window.location.href = href;
+        }, selectedItem.createHref);
         await frameTree.waitForNavigation();
+      } else {
+        console.log('\nEl item anterior ya no existe. Seleccione manualmente.');
+        const selected = await selectItemAndNavigate(frameTree, page, otherLinks, false);
+        if (selected) selectedItemText = selected.text;
+        useCachedPath = false;
       }
     } else {
       selectedItemText = await listAndNavigateNewTransaction(frameTree, page);
@@ -3787,7 +3786,6 @@ const delay = (time) => {
     /////////////////////////////////////////////////////////
     /**     DILIGENCIAR FORMULARIO PARA NUEVO REGISTRO.   **/
     /////////////////////////////////////////////////////////
-    await frameTree.waitForNavigation();
     registerNewTransaction(frameTree, page, null, 
       useCachedPath ? cachedPath.category : null, 
       useCachedPath ? cachedPath.transactionType : null,
