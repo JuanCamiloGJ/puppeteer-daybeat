@@ -62,7 +62,7 @@ const {
         { name: 'Registro masivo de días sin registro', value: '3' },
         { name: 'Corregir / mover registro', value: '4' },
         { name: 'Re-escanear repositorios', value: '5' },
-        { name: 'Config IA', value: '6' },
+        { name: 'Configuración', value: '6' },
         { name: 'Salir', value: '7' }
       ]
     });

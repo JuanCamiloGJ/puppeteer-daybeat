@@ -5,6 +5,7 @@ node_modules/
 .daybeat-path.json
 .daybeat-jira-tokens.json
 .daybeat-ai.json
+.daybeat-clockify.json
 .daybeat-registrations.json
 .atl/
 
