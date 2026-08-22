@@ -44,18 +44,23 @@ GEMINI_MODEL='gemini-3.1-flash-lite'
 ATLASSIAN_ENABLED='true'
 ATLASSIAN_EMAIL='tu email de atlassian (solo si usás API token)'
 ATLASSIAN_API_TOKEN='tu token de API de atlassian (opcional)'
+# Opcional; el callback OAuth local usa 17890 por defecto
+ATLASSIAN_OAUTH_CALLBACK_PORT='17890'
 ```
 
-> **IA sin tocar `.env`**: los providers de IA (OpenCode Zen con modelos gratis y Gemini) se configuran desde el menú **"6. Config IA"** del script y se guardan en `.daybeat-ai.json`. `GEMINI_API_KEY` sigue funcionando como respaldo si no existe esa configuración.
+> **IA sin tocar `.env`**: los providers de IA (OpenCode Zen con modelos gratis y Gemini) se configuran desde el menú **"6. Configuración"** del script y se guardan en `.daybeat-ai.json`. `GEMINI_API_KEY` sigue funcionando como respaldo si no existe esa configuración.
+
+Desde **"6. Configuración"** también se puede seleccionar **"Conectar Jira (OAuth 2.1 / API token)"**. Esta opción abre la autorización de Atlassian cuando hace falta y conecta Jira sin iniciar un registro ni consultar actividad. Una vez autorizada, las ejecuciones siguientes reutilizan el token guardado y lo refrescan automáticamente. La opción **"Desconectar Jira y limpiar estado local"** cierra la conexión y elimina la autorización OAuth guardada.
 
 | Variable | Descripción | Por defecto |
 |----------|-------------|-------------|
 | `GIT_AUTHOR_EMAIL` | Filtra commits por este autor. Si no se define, usa `git config user.email` del primer repositorio encontrado. | - |
-| `GEMINI_API_KEY` | API key de Google Gemini para generar títulos y descripciones con IA. Se puede configurar desde el menú "6. Config IA" (guardado en `.daybeat-ai.json`). Si no hay IA configurada, se usa el método por defecto basado en reglas. | - |
+| `GEMINI_API_KEY` | API key de Google Gemini para generar títulos y descripciones con IA. Se puede configurar desde el menú "6. Configuración" (guardado en `.daybeat-ai.json`). Si no hay IA configurada, se usa el método por defecto basado en reglas. | - |
 | `GEMINI_MODEL` | Modelo de Gemini a usar. | `gemini-3.1-flash-lite` |
 | `ATLASSIAN_ENABLED` | `true` activa el modo "Con información de Jira" con **OAuth 2.1**: la primera ejecución abre el navegador para autorizar (una sola vez; el navegador trae la identidad, no hace falta email ni token; tokens persistidos con refresh automático, sin depender del admin de la org). | - |
 | `ATLASSIAN_EMAIL` | Solo para la alternativa silenciosa con API token (ver abajo). | - |
 | `ATLASSIAN_API_TOKEN` | Opcional. API token personal (https://id.atlassian.com/manage-profile/security/api-tokens). Si se define junto con `ATLASSIAN_EMAIL`, usa autenticación silenciosa en vez de OAuth. El MCP oficial requiere que la org habilite el API token, pero REST (comentarios/worklogs) funciona igual. | - |
+| `ATLASSIAN_OAUTH_CALLBACK_PORT` | Opcional. Puerto fijo del callback OAuth local (`127.0.0.1`). Debe mantenerse estable; por defecto `17890`. | `17890` |
 | `ATLASSIAN_CLOUD_ID` | Opcional. Si se omite, se autodetecta el sitio Atlassian. | autodetección |
 | `ATLASSIAN_SITE_URL` | Opcional. Base REST (ej: `https://tu-sitio.atlassian.net`). Solo si se define `ATLASSIAN_CLOUD_ID` manualmente. | - |
 
@@ -70,7 +75,7 @@ Registra una actividad en Daybeat. Después de seleccionar sección, item, categ
 | Modo | Descripción |
 |------|-------------|
 | **1. Automático** | Usa commits de hoy. Si no hay, usa commits de los últimos 7 días. |
-| **2. Con IA** | Usa la IA configurada (OpenCode Zen con modelos gratis o Gemini, según "6. Config IA") para generar título y descripción. Si no hay IA o falla, usa método por defecto. Si no hay commits del día, usa commits de los últimos 3 días. |
+| **2. Con IA** | Usa la IA configurada (OpenCode Zen con modelos gratis o Gemini, según "6. Configuración") para generar título y descripción. Si no hay IA o falla, usa método por defecto. Si no hay commits del día, usa commits de los últimos 3 días. |
 | **3. Automático fake** | Usa commits de los últimos 7 días para generar un resumen estructurado. |
 | **4. Manual** | Ingresa título, fecha, horario y detalle manualmente. |
 | **5. Con información de Jira** | Consulta incidencias asignadas **en progreso** (siempre, el estado es la señal) o **terminadas hoy**, más comentarios propios y worklogs del día (MCP oficial de Atlassian + REST). Las "por hacer" se excluyen. Muestra la actividad y deja **seleccionar interactivamente** (casillas: espacio marca, `a` todos, enter confirma) qué incidencias/comentarios/worklogs entran al reporte (con la IA configurada si está disponible). Solo aparece si `ATLASSIAN_ENABLED=true`. |

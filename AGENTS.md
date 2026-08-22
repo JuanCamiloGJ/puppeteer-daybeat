@@ -11,7 +11,7 @@ Single-file Node.js Puppeteer script that automates daily task/time registration
 - **Rescan repos:** `node index.js --rescan` or `node diagnostic-commits.js --rescan`
 - **Test Jira integration:** `node test-jira.js` (optionally with a date arg `DD/MM/YYYY`)
 - **Test Clockify integration:** `node test-clockify.js` (optionally with a date arg `DD/MM/YYYY`) — diagnostic against the REAL API with the configured key: shows the key owner, ALL accessible workspaces, the raw time entries per workspace for the date (marking in-progress ones), and what the module consumes (`getDailyActivity` + formatted report). Read-only, does not touch the registration flow.
-- **Tests:** `npm test` (`node --test lib/*.test.js`) — 50 tests: unit (time/summary/git/clockify), smoke (carga de módulos) y un harness E2E del flujo de registro con frames mockeados (`lib/register-flow.e2e.test.js`). Sin lint ni typecheck. GOTCHA: `lib/clockify.test.js` aísla el store en un archivo temporal (`CLOCKIFY_STORE_PATH`, configurable también por env) — NO debe tocar `.daybeat-clockify.json` real del usuario.
+- **Tests:** `npm test` (`node --test lib/*.test.js`) — 59 tests: unit (time/summary/git/clockify/Jira OAuth), smoke (carga de módulos) y un harness E2E del flujo de registro con frames mockeados (`lib/register-flow.e2e.test.js`). Sin lint ni typecheck. GOTCHA: `lib/clockify.test.js` aísla el store en un archivo temporal (`CLOCKIFY_STORE_PATH`, configurable también por env) y `lib/jira-report.test.js` usa `JIRA_TOKEN_STORE_PATH` — NO deben tocar los stores reales del usuario.
 
 ## Environment
 
@@ -23,7 +23,7 @@ Optional AI configuration:
 - AI providers can also be configured from the script itself via menu option "6. Configuración" (see the `lib/ai-config.js` section below) — no env vars needed. `GEMINI_API_KEY` in `.env` remains a valid fallback when no `.daybeat-ai.json` config exists.
 
 Optional Jira configuration (enables mode 5 "Con información de Jira"):
-- `ATLASSIAN_ENABLED=true`: activates the module with **OAuth 2.1** — the first run opens the browser to authorize (one-time; the browser brings the identity, no email/token needed; tokens persisted in `.daybeat-jira-tokens.json` with automatic refresh; no org admin dependency).
+- `ATLASSIAN_ENABLED=true`: activates the module with **OAuth 2.1** — the first run opens the browser to authorize (one-time; the browser brings the identity, no email/token needed; tokens persisted in `.daybeat-jira-tokens.json` with automatic refresh; the loopback callback is stable at `127.0.0.1:17890` by default and can be changed with `ATLASSIAN_OAUTH_CALLBACK_PORT`; no org admin dependency).
 - `ATLASSIAN_EMAIL` + `ATLASSIAN_API_TOKEN`: optional; when both are set, uses silent Basic auth instead of OAuth. NOTE: the official MCP server only accepts API tokens if the org admin enables that auth method — if not, MCP issues fail but REST (comments/worklogs) still works.
 - `ATLASSIAN_CLOUD_ID` / `ATLASSIAN_SITE_URL`: optional overrides; by default the site is auto-detected.
 
@@ -37,7 +37,7 @@ Optional Clockify configuration (enables mode 6 "Con toda la información"):
 Module (the only one outside `index.js`) that fetches daily activity from Jira. Consumed by BOTH the single-registration mode 5 and the bulk registration — no duplicated logic.
 
 - **API**: `isConfigured()`, `getDailyActivity(date)` → `{ issues, comments, worklogs }`, `formatActivityForReport(data)`, `closeConnection()`.
-- **Issues via MCP**: official Atlassian Rovo MCP server. Auth is either OAuth 2.1 (`https://mcp.atlassian.com/v1/mcp/authv2`, `OAuthClientProvider` custom implementation in `lib/jira-report.js` with loopback redirect + DCR + auto-refresh) or Basic `base64(email:token)` (`/v1/mcp`) when `ATLASSIAN_API_TOKEN` is set. Tool `searchJiraIssuesUsingJql` with JQL `assignee = currentUser() AND (statusCategory = "In Progress" OR (statusCategory = Done AND resolutiondate >= startOfDay("YYYY-MM-DD")))` — "In Progress" issues always (status is the signal, not the date), Done only when resolved today, "To Do" never — plus `getAccessibleAtlassianResources` (cloudId) and `atlassianUserInfo` (accountId).
+- **Issues via MCP**: official Atlassian Rovo MCP server. Auth is either OAuth 2.1 (`https://mcp.atlassian.com/v1/mcp/authv2`, `OAuthClientProvider` custom implementation in `lib/jira-report.js` with stable loopback redirect + DCR + auto-refresh) or Basic `base64(email:token)` (`/v1/mcp`) when `ATLASSIAN_API_TOKEN` is set. Tool `searchJiraIssuesUsingJql` with JQL `assignee = currentUser() AND (statusCategory = "In Progress" OR (statusCategory = Done AND resolutiondate >= startOfDay("YYYY-MM-DD")))` — "In Progress" issues always (status is the signal, not the date), Done only when resolved today, "To Do" never — plus `getAccessibleAtlassianResources` (cloudId) and `atlassianUserInfo` (accountId).
 - **Comments & worklogs via REST**: the official MCP has NO comment/worklog-read tools, so `lib/jira-report.js` calls the Jira Cloud REST API (`/rest/api/3/issue/{key}/comment`, `/rest/api/3/issue/{key}/worklog?started=...`), filtering by the authenticated accountId and the target date. Comments use a BROADER JQL than the report issues (`assignee = currentUser() OR updated >= startOfDay("YYYY-MM-DD")`) so comments made on "To Do" issues are still found; the comment `body` comes back as an ADF object (not a string) and must be flattened via `bodyToText()`. In OAuth mode the REST calls go to `https://api.atlassian.com/ex/jira/{cloudId}` with the OAuth access token; in Basic mode they use the site URL with the personal token.
 - **Free usage**: only non-beta tools are used; beta tools (`searchAtlassian`, Teamwork Graph) are avoided because they may become paid (Rovo credits).
 - **Failure model**: module never throws toward the registration flow — callers catch errors and degrade gracefully (the report continues without Jira data).
@@ -159,7 +159,7 @@ Central module (like `lib/jira-report.js`) that manages AI providers for title/d
 - **Gemini endpoint**: unchanged `https://generativelanguage.googleapis.com/v1beta/interactions` (`x-goog-api-key`).
 - **Retry**: `fetchWithRetry` — up to 4 attempts, exponential backoff, for 503/429 and network timeouts. Returns the model's RAW text; `generateWithGemini` parses the JSON `{title, detail}` and truncates (unchanged).
 - **Failure model**: module never throws toward the registration flow — `callAI`/`testConnection` return null/`{ok:false}` and callers fall back to rule-based summaries.
-- **Menu "6. Configuración"** (before "Salir", no Daybeat login needed): change active provider, connect OpenCode Zen, set Gemini key, change model, test connection, connect Clockify (guided API key flow `connectClockifyFlow`).
+- **Menu "6. Configuración"** (before "Salir", no Daybeat login needed): change active provider, connect OpenCode Zen, set Gemini key, change model, test connection, connect/disconnect Jira (`connectJiraFlow`/`disconnectJiraFlow`, OAuth/API token without starting a registration), and connect Clockify (guided API key flow `connectClockifyFlow`).
 
 ## Commit retrieval functions
 
