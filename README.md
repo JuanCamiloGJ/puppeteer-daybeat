@@ -23,7 +23,11 @@ Proyecto ejecutable para diligenciar tareas diarias en Daybeat de forma automát
 
 ## Configuración
 
-Crear un archivo `.env` en la raíz del proyecto con las siguientes variables:
+En la **primera ejecución** el script abre un **asistente de configuración inicial** que pide los datos obligatorios de Daybeat (URL, compañía, usuario y contraseña) y ofrece —de forma opcional y saltable— Git, Jira, Clockify e IA. Hasta no completar los datos de Daybeat, el resto del programa no se habilita.
+
+La configuración se guarda en **`.daybeat-config.json`** (gitignored), que es la fuente principal de configuración. Se puede volver a editar desde el menú **"6. Configuración" → "Reconfigurar aplicación (setup inicial)"**.
+
+El **`.env` se mantiene como respaldo**: la primera ejecución sin `.daybeat-config.json` migra automáticamente sus valores al nuevo archivo (una sola vez, sin borrar el `.env`). Después, el archivo manda y los cambios se hacen desde el menú. Los valores equivalentes del `.env`:
 
 ### Variables requeridas
 
@@ -48,7 +52,7 @@ ATLASSIAN_API_TOKEN='tu token de API de atlassian (opcional)'
 ATLASSIAN_OAUTH_CALLBACK_PORT='17890'
 ```
 
-> **IA sin tocar `.env`**: los providers de IA (OpenCode Zen con modelos gratis y Gemini) se configuran desde el menú **"6. Configuración"** del script y se guardan en `.daybeat-ai.json`. `GEMINI_API_KEY` sigue funcionando como respaldo si no existe esa configuración.
+> **IA sin tocar `.env`**: los providers de IA (OpenCode Zen con modelos gratis y Gemini) se configuran desde el menú **"6. Configuración"** del script y se guardan en `.daybeat-ai.json`. `GEMINI_API_KEY` sigue funcionando como respaldo si no existe esa configuración. Lo mismo aplica a Clockify (`.daybeat-clockify.json`) y a los tokens OAuth de Jira (`.daybeat-jira-tokens.json`): las credenciales de las integraciones viven en sus propios archivos, mientras `.daybeat-config.json` guarda solo la configuración base y las preferencias.
 
 Desde **"6. Configuración"** también se puede seleccionar **"Conectar Jira (OAuth 2.1 / API token)"**. Esta opción abre la autorización de Atlassian cuando hace falta y conecta Jira sin iniciar un registro ni consultar actividad. Una vez autorizada, las ejecuciones siguientes reutilizan el token guardado y lo refrescan automáticamente. La opción **"Desconectar Jira y limpiar estado local"** cierra la conexión y elimina la autorización OAuth guardada.
 

@@ -12,6 +12,7 @@
   "dependencies": {
     "@inquirer/checkbox": "^5.2.1",
     "@inquirer/confirm": "^6.2.0",
+    "@inquirer/password": "^5.1.2",
     "@inquirer/select": "^5.2.2",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "dotenv": "^16.4.5",

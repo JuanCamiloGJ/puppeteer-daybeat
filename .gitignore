@@ -1,5 +1,6 @@
 node_modules/
 .env
+.daybeat-config.json
 .daybeat-history.json
 .daybeat-repos.json
 .daybeat-path.json

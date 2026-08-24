@@ -1,4 +1,6 @@
 require('dotenv').config();
+const appConfig = require('./lib/app-config.js');
+appConfig.initialize();
 const { isConfigured, getDailyActivity, formatActivityForReport, closeConnection } = require('./lib/jira-report.js');
 
 const testJiraReport = async () => {

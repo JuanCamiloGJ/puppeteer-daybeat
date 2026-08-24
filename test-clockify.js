@@ -11,6 +11,8 @@
  */
 
 require('dotenv').config();
+const appConfig = require('./lib/app-config.js');
+appConfig.initialize();
 const fs = require('fs');
 const path = require('path');
 const clockify = require('./lib/clockify.js');

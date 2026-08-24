@@ -11,11 +11,11 @@ Single-file Node.js Puppeteer script that automates daily task/time registration
 - **Rescan repos:** `node index.js --rescan` or `node diagnostic-commits.js --rescan`
 - **Test Jira integration:** `node test-jira.js` (optionally with a date arg `DD/MM/YYYY`)
 - **Test Clockify integration:** `node test-clockify.js` (optionally with a date arg `DD/MM/YYYY`) — diagnostic against the REAL API with the configured key: shows the key owner, ALL accessible workspaces, the raw time entries per workspace for the date (marking in-progress ones), and what the module consumes (`getDailyActivity` + formatted report). Read-only, does not touch the registration flow.
-- **Tests:** `npm test` (`node --test lib/*.test.js`) — 59 tests: unit (time/summary/git/clockify/Jira OAuth), smoke (carga de módulos) y un harness E2E del flujo de registro con frames mockeados (`lib/register-flow.e2e.test.js`). Sin lint ni typecheck. GOTCHA: `lib/clockify.test.js` aísla el store en un archivo temporal (`CLOCKIFY_STORE_PATH`, configurable también por env) y `lib/jira-report.test.js` usa `JIRA_TOKEN_STORE_PATH` — NO deben tocar los stores reales del usuario.
+- **Tests:** `npm test` (`node --test lib/*.test.js`) — 65 tests: unit (time/summary/git/clockify/Jira OAuth/app-config), smoke (carga de módulos) y un harness E2E del flujo de registro con frames mockeados (`lib/register-flow.e2e.test.js`). Sin lint ni typecheck. GOTCHA: `lib/clockify.test.js` aísla el store en un archivo temporal (`CLOCKIFY_STORE_PATH`, configurable también por env), `lib/jira-report.test.js` usa `JIRA_TOKEN_STORE_PATH` y `lib/app-config.test.js` usa `APP_CONFIG_PATH` — NO deben tocar los stores/config reales del usuario.
 
 ## Environment
 
-Requires `.env` (see `.env.example`) with: `LINK_DAYBEAT`, `COMPANY`, `USERNAME_DAYBEAT`, `PASSWORD`, `ROOT_DIR`. The script exits early if any of the first four are missing. `ROOT_DIR` is the directory where the script recursively searches for git repositories to extract commit information. Accepts both Linux paths (`/home/user/repos`) and Windows UNC paths (`//wsl.localhost/distro/home/user/repos`) — auto-detects the platform and converts. Use Linux paths if running from WSL, or UNC paths if running from Windows/Git Bash. Optional: `GIT_AUTHOR_EMAIL` to filter commits by author (falls back to `git config user.email` from the first valid repo).
+The app's base config now lives in `.daybeat-config.json` (gitignored), created by the initial setup wizard and editable from menu option 6 → "Reconfigurar aplicación". The legacy `.env` (see `.env.example`) remains as a fallback: the first run without a config file migrates its values into `.daybeat-config.json` (one-time, `.env` untouched); after that, the config file wins and `syncEnv()` applies it to `process.env` so existing modules keep working. Setup gates the whole program: until Daybeat (link/company/user/password) is complete, the script only shows the wizard and exits. Git (`ROOT_DIR`), Jira, Clockify and AI are OPTIONAL — omitted integrations degrade gracefully (no Git → commit modes fall back to fake; no Jira → mode 5 hidden; etc.).
 
 Optional AI configuration:
 - `GEMINI_API_KEY`: API key for Google Gemini AI. If provided, enables AI-generated summaries.
@@ -144,6 +144,13 @@ The main menu includes option "2. Ver días sin registro" which:
 
 This feature iterates through all projects and items to collect all transaction dates, which can take several minutes depending on the number of projects (skipped when the cache is used). Pagination is handled automatically when an item has more than ~15 transactions.
 
+## Setup inicial (`lib/flows/setup.js` + `lib/app-config.js`)
+
+- `lib/app-config.js` centralizes the base config (`.daybeat-config.json`, gitignored): Daybeat credentials, Git (rootDir/authorEmail), preferences (headless) and the Jira enable flag (`integrations.jira`). Priority: config file → `.env` → defaults. `initialize()` (called once at startup, BEFORE requiring modules that read `process.env` at load time) migrates `.env` one-time and then `syncEnv()` applies the file to `process.env`. Setters (`setDaybeat`/`setGit`/`setHeadless`/`setJiraEnabled`) save and re-sync. When Jira is disabled, `syncEnv()` deletes `ATLASSIAN_ENABLED`/`ATLASSIAN_EMAIL`/`ATLASSIAN_API_TOKEN` from env so the integration truly turns off.
+- `lib/flows/setup.js` (`runSetupWizard({edit})`) is the initial-setup wizard: Daybeat fields are mandatory (password uses `prompt.askPassword` via `@inquirer/password`, masked); Git, Jira, Clockify and AI are optional and skippable. It runs BEFORE `puppeteer.launch()` when `appConfig.isSetupComplete()` is false — the program shows nothing else until Daybeat is saved. From the main menu it is reachable via "6. Configuración" → "Reconfigurar aplicación (setup inicial)".
+- Jira enable/disable is menu-driven: `connectJiraFlow` activates `integrations.jira` on demand; `disconnectJiraFlow` deactivates it after cleaning the token store.
+- `ROOT_DIR` is optional: with no Git configured, `findGitRepos` prints a friendly note and registration flows fall back to fake/manual modes (no scary error).
+
 ## Commit summary rules
 
 Commits are categorized by conventional commit prefix (`feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`). The summary is structured as: "Implementación de: X. Correcciones: Y. Refactorización: Z." Limited to 200 chars.
@@ -159,7 +166,7 @@ Central module (like `lib/jira-report.js`) that manages AI providers for title/d
 - **Gemini endpoint**: unchanged `https://generativelanguage.googleapis.com/v1beta/interactions` (`x-goog-api-key`).
 - **Retry**: `fetchWithRetry` — up to 4 attempts, exponential backoff, for 503/429 and network timeouts. Returns the model's RAW text; `generateWithGemini` parses the JSON `{title, detail}` and truncates (unchanged).
 - **Failure model**: module never throws toward the registration flow — `callAI`/`testConnection` return null/`{ok:false}` and callers fall back to rule-based summaries.
-- **Menu "6. Configuración"** (before "Salir", no Daybeat login needed): change active provider, connect OpenCode Zen, set Gemini key, change model, test connection, connect/disconnect Jira (`connectJiraFlow`/`disconnectJiraFlow`, OAuth/API token without starting a registration), and connect Clockify (guided API key flow `connectClockifyFlow`).
+- **Menu "6. Configuración"** (before "Salir", no Daybeat login needed): change active provider, connect OpenCode Zen, set Gemini key, change model, test connection, connect/disconnect Jira (`connectJiraFlow`/`disconnectJiraFlow`, OAuth/API token without starting a registration), connect Clockify (guided API key flow `connectClockifyFlow`), and reconfigure the base app (`runSetupWizard({edit:true})`).
 
 ## Commit retrieval functions
 
