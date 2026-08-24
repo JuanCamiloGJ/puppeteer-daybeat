@@ -1,6 +1,12 @@
 require('dotenv').config();
+const appConfig = require('./lib/app-config.js');
+// Migra .env → .daybeat-config.json (si aplica) y aplica la config a
+// process.env ANTES de cargar módulos que leen env en tiempo de carga.
+appConfig.initialize();
+
 const puppeteer = require('puppeteer');
 const prompt = require('./lib/prompt.js');
+const { runSetupWizard } = require('./lib/flows/setup.js');
 
 const { createSession } = require('./lib/session.js');
 const daybeat = require('./lib/daybeat.js');
@@ -32,6 +38,19 @@ const {
   selectItemAndNavigate
 } = daybeat;
 (async () => {
+  // Setup inicial: hasta no completar los datos de Daybeat, el resto del
+  // programa no se habilita (solo el asistente).
+  if (!appConfig.isSetupComplete()) {
+    console.log('Falta completar la configuración inicial de la aplicación.');
+    const done = await runSetupWizard({ edit: false });
+    if (!done) {
+      console.log('Configuración inicial incompleta. Ejecutá el script de nuevo para reintentar.');
+      prompt.close();
+      return;
+    }
+    appConfig.syncEnv();
+  }
+
   // HEADLESS: 'true' oculta el navegador (sin ventana); 'false' lo muestra.
   const browser = await puppeteer.launch({ headless: process.env.HEADLESS === 'true' });
   const page = await browser.newPage();
@@ -40,12 +59,6 @@ const {
   const company = process.env.COMPANY;
   const usernameDaybeat = process.env.USERNAME_DAYBEAT;
   const password = process.env.PASSWORD;
-
-  if (!linkDaybeat || !company || !usernameDaybeat || !password) {
-    console.log("ERROR: Defina variables de entorno para continuar.");
-    browser.close();
-    return;
-  }
 
   const holidays = await checkHolidaysYear();
   const session = createSession({ page, browser, company, usernameDaybeat, password, holidays });
